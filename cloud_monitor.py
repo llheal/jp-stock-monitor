@@ -63,10 +63,7 @@ def fetch_index_data(ticker_symbol, start_str):
 
         # --- 计算当日收益 (Daily) ---
         daily_ret = 0.0
-        # 昨收价：倒数第2天的收盘价 (如果今天还没收盘，history最后一行可能是今天，也可能是昨天)
-        # 这里的逻辑比较 trick，简单起见：
-        # 我们假设 hist_recent 的最后一行如果是“今天”，那倒数第二行就是“昨天”
-        # yfinance 的 history 在盘中时，最后一行通常是今天的实时数据
+        # 昨收价：倒数第2天的收盘价
         if len(hist_recent) >= 2:
             prev_close = hist_recent['Close'].iloc[-2]
             daily_ret = (current_price - prev_close) / prev_close
@@ -117,7 +114,11 @@ def fetch_stock_data(codes, start_str):
                 buy_price = hist.iloc[0]['Open']
                 buy_date = hist.index[0].strftime('%m-%d')
             
-            ret = (current_price - buy_price) / buy_price if buy_price else 0
+            # 避免除以零
+            if buy_price > 0:
+                ret = (current_price - buy_price) / buy_price
+            else:
+                ret = 0.0
             
             data_list.append({
                 "代码": code,
@@ -126,7 +127,8 @@ def fetch_stock_data(codes, start_str):
                 "现价": current_price,
                 "收益率": ret
             })
-        except:
+        except Exception as e:
+            # 如果某只股票获取失败，不影响整体，记录错误或跳过
             pass
         
         progress_bar.progress((i + 1) / len(codes))
@@ -165,17 +167,16 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
     # A. 市场概况卡片
     st.caption(f"📊 市场概况 (东京时间 {now.strftime('%H:%M')})")
     
-    # 使用 3 列布局，或者 2 列
+    # 使用 2 列布局
     idx_c1, idx_c2 = st.columns(2)
     
     with idx_c1:
         if nikkei_data["valid"]:
-            # Value 显示当日涨跌，Delta 显示本月累计
             st.metric(
                 label="日经 225 (日 | 月)",
                 value=f"{nikkei_data['daily_ret']:+.2%}", 
                 delta=f"{nikkei_data['mtd_ret']:+.2%} 本月",
-                delta_color="normal" # 红色涨绿色跌(默认逻辑)
+                delta_color="normal"
             )
         else:
             st.metric("日经 225", "获取失败")
@@ -211,7 +212,7 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
                       delta_color="normal" if total_ret > 0 else "inverse")
         with strat_c2:
             st.metric("相对 TOPIX (Alpha)", f"{alpha:+.2%}",
-                      delta_color="off") # Alpha 不变色，直接看数值
+                      delta_color="off")
 
         st.divider()
         
@@ -224,14 +225,13 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
             c_ret = row['收益率']
             c_price = row['现价']
             
-            # 简单配色：涨红跌绿 (如果你习惯美股绿涨红跌，可以反过来)
+            # 简单配色：涨红跌绿
             color = "red" if c_ret > 0 else "green"
             
             with st.container():
                 c1, c2, c3 = st.columns([2, 2, 2])
                 c1.markdown(f"**{c_code}**")
                 c2.write(f"¥{c_price:,.0f}")
-                # 使用 colored text 显示收益率
                 c3.markdown(f":{color}[{c_ret:+.2%}]")
                 st.divider()
     else:
@@ -243,96 +243,3 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
 # --- 底部 ---
 if "codes" in st.query_params:
     st.caption("💡 提示：列表已保存到网址，请收藏当前页面。")
-            stock = yf.Ticker(ticker_symbol)
-            # 优先获取历史数据找开盘价
-            hist = stock.history(start=start_str, interval="1d")
-            
-            if hist.empty:
-                hist = stock.history(period="1mo", interval="1d")
-            
-            # 获取实时价 (尝试 5m 数据，因为 info 接口经常慢)
-            current_price = 0.0
-            # 尝试获取 intraday 数据
-            todays_data = stock.history(period="1d", interval="5m")
-            
-            if not todays_data.empty:
-                current_price = todays_data['Close'].iloc[-1]
-            elif not hist.empty:
-                current_price = hist['Close'].iloc[-1]
-            
-            # 获取买入价 (月初 Open)
-            if not hist.empty:
-                buy_price = hist.iloc[0]['Open']
-                buy_date = hist.index[0].strftime('%m-%d')
-            else:
-                buy_price = current_price # 兜底
-                buy_date = "N/A"
-            
-            ret = (current_price - buy_price) / buy_price if buy_price else 0
-            
-            data_list.append({
-                "代码": code,
-                "买入日": buy_date,
-                "买入价": buy_price,
-                "现价": current_price,
-                "收益率": ret
-            })
-            
-        except Exception as e:
-            pass # 忽略单个错误，继续下一个
-        
-        progress_bar.progress((i + 1) / len(codes))
-    
-    progress_bar.empty()
-    return pd.DataFrame(data_list)
-
-# --- 显示界面 ---
-st.title("📱 策略实盘监控")
-
-# 处理代码列表
-# 清理换行符和空格，压缩成单行字符串，方便存入 URL
-clean_codes_list = [c.strip() for c in user_input.replace('\n', ',').replace('，', ',').split(',') if c.strip()]
-clean_codes_str = ",".join(clean_codes_list)
-
-# --- 2. 按钮与 URL 更新逻辑 ---
-if st.button("🔄 刷新数据 & 保存列表", type="primary", use_container_width=True):
-    if not clean_codes_list:
-        st.warning("请在侧边栏输入股票代码")
-    else:
-        # [关键] 将当前输入框的内容，更新到浏览器地址栏
-        st.query_params["codes"] = clean_codes_str
-        
-        # 开始获取数据
-        df = get_stock_data(clean_codes_list)
-        
-        if not df.empty:
-            avg_ret = df['收益率'].mean()
-            total_ret = avg_ret * leverage
-            
-            st.metric("组合总收益 (杠杆后)", f"{total_ret:.2%}", 
-                      delta_color="normal" if total_ret > 0 else "inverse")
-            
-            st.markdown("---")
-            
-            df = df.sort_values(by='收益率', ascending=False)
-            
-            for _, row in df.iterrows():
-                c_code = row['代码']
-                c_ret = row['收益率']
-                c_price = row['现价']
-                
-                color = "green" if c_ret > 0 else "red"
-                
-                with st.container():
-                    c1, c2, c3 = st.columns([2, 2, 2])
-                    c1.markdown(f"**{c_code}**")
-                    c2.write(f"¥{c_price:,.0f}")
-                    c3.markdown(f":{color}[{c_ret:+.2%}]")
-                    st.divider()
-        else:
-            st.error("未能获取数据，请检查代码是否正确")
-
-# --- 底部提示 ---
-if "codes" in st.query_params:
-    st.caption("💡 提示：当前股票列表已保存到网址中。您可以直接**收藏当前网页**，下次打开即为这些股票。")
-
