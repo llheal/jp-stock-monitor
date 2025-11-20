@@ -41,9 +41,10 @@ def get_current_price(ticker_symbol):
 
 def fetch_index_data(ticker_symbol, start_str):
     """
-    获取指数的双重数据：
-    1. 当日涨跌 (Daily Return)
-    2. 本月涨跌 (MTD Return)
+    获取指数的三重数据：
+    1. 当前点位/价格
+    2. 当日涨跌 (Daily Return)
+    3. 本月涨跌 (MTD Return)
     """
     try:
         stock = yf.Ticker(ticker_symbol)
@@ -88,7 +89,7 @@ def fetch_index_data(ticker_symbol, start_str):
         return {"valid": False}
 
 def fetch_stock_data(codes, start_str):
-    """获取持仓股票数据 (仅关注本月收益)"""
+    """获取持仓股票数据"""
     data_list = []
     progress_bar = st.progress(0)
     
@@ -159,7 +160,6 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
     st.query_params["codes"] = clean_codes_str
     
     # 1. 获取大盘指数
-    # [关键修改] 使用 1306.T 代替 ^TOPX，数据更稳定
     nikkei_data = fetch_index_data("^N225", start_str)
     topix_data = fetch_index_data("1306.T", start_str)
     
@@ -171,15 +171,17 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
     # A. 市场概况卡片
     st.caption(f"📊 市场概况 (东京时间 {now.strftime('%H:%M')})")
     
-    # 使用 2 列布局
     idx_c1, idx_c2 = st.columns(2)
     
     with idx_c1:
         if nikkei_data["valid"]:
+            # Value: 具体点位
+            # Delta: 当日涨跌
+            # Label: 指数名 + (本月涨跌)
             st.metric(
-                label="日经 225",
-                value=f"{nikkei_data['daily_ret']:+.2%}", 
-                delta=f"{nikkei_data['mtd_ret']:+.2%} 本月",
+                label=f"日经 225 (本月 {nikkei_data['mtd_ret']:+.1%})",
+                value=f"{nikkei_data['price']:,.2f}", 
+                delta=f"{nikkei_data['daily_ret']:+.2%} 今日",
                 delta_color="normal"
             )
         else:
@@ -187,11 +189,11 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
             
     with idx_c2:
         if topix_data["valid"]:
-            # 标注为 ETF，防止价格数字对不上产生误解
+            # TOPIX 使用 ETF 价格
             st.metric(
-                label="TOPIX (ETF)",
-                value=f"{topix_data['daily_ret']:+.2%}", 
-                delta=f"{topix_data['mtd_ret']:+.2%} 本月",
+                label=f"TOPIX ETF (本月 {topix_data['mtd_ret']:+.1%})",
+                value=f"{topix_data['price']:,.0f}", 
+                delta=f"{topix_data['daily_ret']:+.2%} 今日",
                 delta_color="normal"
             )
         else:
