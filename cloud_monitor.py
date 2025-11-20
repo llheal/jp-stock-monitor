@@ -129,7 +129,7 @@ if st.button("🔄 刷新详细行情", type="primary", use_container_width=True
     
     # 1. 获取指数
     n225 = fetch_market_data("^N225", start_str, is_index=True)
-    topx = fetch_market_data("^TOPX", start_str, is_index=True)
+    topx = fetch_market_data("998405.T", start_str, is_index=True)
     etf  = fetch_market_data("1306.T", start_str, is_index=True)
     
     # 2. 获取持仓
@@ -232,3 +232,4 @@ if st.button("🔄 刷新详细行情", type="primary", use_container_width=True
 # --- 底部 ---
 if "codes" in st.query_params:
     st.caption("💡 列表已保存，请收藏当前网址。")
+
