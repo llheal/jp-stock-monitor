@@ -8,7 +8,7 @@ import pytz
 import re
 
 # --- 页面配置 ---
-st.set_page_config(page_title="日股实盘全景", page_icon="📱", layout="centered")
+st.set_page_config(page_title="日股实盘", page_icon="📱", layout="centered")
 
 # --- 1. 智能默认值 ---
 FALLBACK_CODES = "7203, 9984, 8035" 
@@ -277,3 +277,4 @@ if st.button("🔄 刷新详细行情", type="primary", use_container_width=True
 # --- 底部 ---
 if "codes" in st.query_params:
     st.caption("💡 列表已保存。")
+
