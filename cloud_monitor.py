@@ -58,22 +58,25 @@ def fetch_index_data(ticker_symbol, start_str):
 
         # C. 获取实时价格
         current_price = get_current_price(ticker_symbol)
+        # 如果实时获取失败，尝试用历史最后一天
         if current_price == 0 and not hist_recent.empty:
             current_price = hist_recent['Close'].iloc[-1]
 
         # --- 计算当日收益 (Daily) ---
         daily_ret = 0.0
-        # 昨收价：倒数第2天的收盘价
+        # 昨收价：倒数第2天的收盘价 
         if len(hist_recent) >= 2:
             prev_close = hist_recent['Close'].iloc[-2]
-            daily_ret = (current_price - prev_close) / prev_close
+            if prev_close > 0:
+                daily_ret = (current_price - prev_close) / prev_close
         
         # --- 计算本月收益 (MTD) ---
         mtd_ret = 0.0
         if not hist_mtd.empty:
             # 月初开盘价
             month_open = hist_mtd.iloc[0]['Open']
-            mtd_ret = (current_price - month_open) / month_open
+            if month_open > 0:
+                mtd_ret = (current_price - month_open) / month_open
 
         return {
             "daily_ret": daily_ret,
@@ -93,6 +96,7 @@ def fetch_stock_data(codes, start_str):
         code = code.strip()
         if not code: continue
         
+        # 处理 .T 后缀
         ticker_symbol = f"{code}.T" if not code.endswith(".T") else code
         
         try:
@@ -127,8 +131,7 @@ def fetch_stock_data(codes, start_str):
                 "现价": current_price,
                 "收益率": ret
             })
-        except Exception as e:
-            # 如果某只股票获取失败，不影响整体，记录错误或跳过
+        except:
             pass
         
         progress_bar.progress((i + 1) / len(codes))
@@ -141,6 +144,7 @@ def fetch_stock_data(codes, start_str):
 # 1. 确定时间
 jp_tz = pytz.timezone('Asia/Tokyo')
 now = datetime.now(jp_tz)
+# 确保时区一致性
 start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 start_str = start_of_month.strftime('%Y-%m-%d')
 
@@ -155,9 +159,9 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
     st.query_params["codes"] = clean_codes_str
     
     # 1. 获取大盘指数
-    # 日经225 (^N225) 和 TOPIX (^TOPX)
+    # [关键修改] 使用 1306.T 代替 ^TOPX，数据更稳定
     nikkei_data = fetch_index_data("^N225", start_str)
-    topix_data = fetch_index_data("^TOPX", start_str)
+    topix_data = fetch_index_data("1306.T", start_str)
     
     # 2. 获取个股持仓
     df = fetch_stock_data(clean_codes_list, start_str)
@@ -173,7 +177,7 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
     with idx_c1:
         if nikkei_data["valid"]:
             st.metric(
-                label="日经 225 (日 | 月)",
+                label="日经 225",
                 value=f"{nikkei_data['daily_ret']:+.2%}", 
                 delta=f"{nikkei_data['mtd_ret']:+.2%} 本月",
                 delta_color="normal"
@@ -183,8 +187,9 @@ if st.button("🔄 刷新行情", type="primary", use_container_width=True):
             
     with idx_c2:
         if topix_data["valid"]:
+            # 标注为 ETF，防止价格数字对不上产生误解
             st.metric(
-                label="TOPIX (日 | 月)",
+                label="TOPIX (ETF)",
                 value=f"{topix_data['daily_ret']:+.2%}", 
                 delta=f"{topix_data['mtd_ret']:+.2%} 本月",
                 delta_color="normal"
