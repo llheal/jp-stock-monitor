@@ -22,59 +22,87 @@ st.sidebar.header("⚙️ 持仓配置")
 user_input = st.sidebar.text_area("持仓代码 (逗号分隔)", value=initial_value, height=150)
 leverage = st.sidebar.number_input("杠杆率 (x)", value=1.5, step=0.1)
 
-# --- 核心函数：爬取 Google 财经 (解决 TOPIX 问题) ---
+# --- 核心函数 1：爬取 Google 财经 ---
 def get_google_index_data(symbol_code):
-    """
-    爬取 Google Finance 获取实时指数点位和涨跌
-    symbol_code 例如: "TOPIX:INDEXTOKYO" 或 "NI225:INDEXNIKKEI"
-    """
     url = f"https://www.google.com/finance/quote/{symbol_code}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
     try:
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code != 200: return None
         soup = BeautifulSoup(r.content, "html.parser")
         
-        # 1. 获取现价 (Google Finance 的大字价格通常在这个 class 里)
+        # 获取现价 (Google Class 名可能会变，YMlKec 目前是主流)
         price_div = soup.find("div", class_="YMlKec fxKbKc")
-        if not price_div: return {"valid": False}
+        if not price_div: return None
         
-        price_str = price_div.text.replace(",", "")
-        current_price = float(price_str)
+        current_price = float(price_div.text.replace(",", ""))
         
-        # 2. 获取当日涨跌幅
-        # 涨跌幅通常在价格旁边，带 % 号
-        # 我们尝试找包含 % 的 span
-        change_divs = soup.find_all("div", class_="JwB6zf") # 这是变化值的容器
-        daily_ret = 0.0
-        
-        # Google 的结构经常变，我们尝试计算：(现价 - 昨收) / 昨收
-        # 昨收通常标记为 "Previous close"
-        # 遍历所有 P6K39c class (指标数值)，找到昨收
+        # 获取当日涨跌 (尝试从昨收计算)
         prev_close = 0.0
-        labels = soup.find_all("div", class_="mfs77b") # 标签名 class
+        labels = soup.find_all("div", class_="mfs77b")
         for label in labels:
-            if "Previous close" in label.text or "昨" in label.text:
-                # 它的值在下一个同级 div 的 P6K39c 里
+            if "Previous" in label.text or "昨" in label.text:
                 val_div = label.find_next("div", class_="P6K39c")
                 if val_div:
-                    prev_str = val_div.text.replace(",", "")
-                    prev_close = float(prev_str)
+                    prev_close = float(val_div.text.replace(",", ""))
                     break
         
-        if prev_close > 0:
-            daily_ret = (current_price - prev_close) / prev_close
-        
-        # 注意：爬虫很难获取精准的“本月”涨跌，这里暂缺“本月”数据，或者通过 yf 补全
-        return {
-            "price": current_price,
-            "daily_ret": daily_ret,
-            "valid": True
-        }
-    except Exception as e:
-        return {"valid": False}
+        daily_ret = (current_price - prev_close) / prev_close if prev_close > 0 else 0.0
+        return {"price": current_price, "daily_ret": daily_ret, "valid": True}
+    except:
+        return None
 
-# --- 核心函数：yfinance (个股 & 日经) ---
+# --- 核心函数 2：爬取 Yahoo Japan (备用) ---
+def get_yahoo_jp_data(code):
+    """爬取 Yahoo Finance Japan (针对 998405.T 等)"""
+    url = f"https://finance.yahoo.co.jp/quote/{code}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code != 200: return None
+        soup = BeautifulSoup(r.content, "html.parser")
+        
+        # Yahoo JP 的价格通常在大字号 span 里，或者通过正则暴力匹配
+        # 寻找类似 "2,700.50" 这样的数字结构，且在名为 "price" 或 "number" 的容器附近
+        # 这里使用正则粗暴匹配页面中最大的像价格的数字（针对指数通常在 header）
+        
+        # 尝试方法 A: 找特定 class (Yahoo JP class 经常变，不可靠)
+        # 尝试方法 B: 正则匹配 title 或 meta
+        # <meta name="description" content="TOPIX【998405.T】の株価... 2,712.34 ...">
+        # 但 meta 通常有延迟。
+        
+        # 尝试方法 C: 找页面里的大数字
+        # 提取所有大字文本
+        spans = soup.find_all("span")
+        candidates = []
+        for s in spans:
+            text = s.text.strip().replace(',', '')
+            # 匹配浮点数
+            if re.match(r'^\d{3,5}\.\d{2}$', text):
+                candidates.append(float(text))
+        
+        if not candidates: return None
+        
+        # 假设页面上方第一个大数字就是现价 (通常指数点位在 2000-40000 之间)
+        # 过滤掉不合理的数字
+        valid_candidates = [x for x in candidates if x > 500] 
+        if not valid_candidates: return None
+        
+        current_price = valid_candidates[0] # 取第一个匹配到的通常是现价
+        
+        # 计算涨跌 (简单起见，Yahoo JP 较难爬昨收，这里只返回价格，涨跌设为0或通过其他方式估算)
+        # 我们可以用 ETF 的涨跌幅来“借用”给指数
+        return {"price": current_price, "daily_ret": 0.0, "valid": True}
+        
+    except:
+        return None
+
+# --- 核心函数 3：yfinance (个股 & 日经) ---
 def get_safe_price(hist_data):
     if not hist_data.empty:
         return hist_data['Close'].iloc[-1]
@@ -87,7 +115,6 @@ def fetch_market_data(ticker_symbol, start_str, is_index=False):
         hist_mtd = stock.history(start=start_str)
         if hist_mtd.empty: hist_mtd = stock.history(period="1mo")
 
-        # 现价
         try:
             intraday = stock.history(period="1d", interval="5m")
             if not intraday.empty:
@@ -97,14 +124,12 @@ def fetch_market_data(ticker_symbol, start_str, is_index=False):
         except:
             current_price = get_safe_price(hist_recent)
 
-        # 日收益
         daily_ret = 0.0
         if len(hist_recent) >= 2:
             prev_close = hist_recent['Close'].iloc[-2]
             if prev_close > 0:
                 daily_ret = (current_price - prev_close) / prev_close
 
-        # 月收益
         mtd_ret = 0.0
         buy_price = 0.0
         buy_date = "N/A"
@@ -114,7 +139,6 @@ def fetch_market_data(ticker_symbol, start_str, is_index=False):
             if buy_price > 0:
                 mtd_ret = (current_price - buy_price) / buy_price
 
-        # 名称
         name = ticker_symbol
         if not is_index:
             try:
@@ -124,13 +148,8 @@ def fetch_market_data(ticker_symbol, start_str, is_index=False):
                 pass
 
         return {
-            "name": name,
-            "price": current_price,
-            "daily_ret": daily_ret,
-            "mtd_ret": mtd_ret,
-            "buy_price": buy_price,
-            "buy_date": buy_date,
-            "valid": True
+            "name": name, "price": current_price, "daily_ret": daily_ret,
+            "mtd_ret": mtd_ret, "buy_price": buy_price, "buy_date": buy_date, "valid": True
         }
     except:
         return {"valid": False}
@@ -145,12 +164,8 @@ def fetch_portfolio_data(codes, start_str):
         data = fetch_market_data(ticker, start_str)
         if data["valid"]:
             data_list.append({
-                "代码": code,
-                "名称": data["name"],
-                "现价": data["price"],
-                "买入价": data["buy_price"],
-                "日收益": data["daily_ret"],
-                "月收益": data["mtd_ret"]
+                "代码": code, "名称": data["name"], "现价": data["price"],
+                "买入价": data["buy_price"], "日收益": data["daily_ret"], "月收益": data["mtd_ret"]
             })
         progress_bar.progress((i + 1) / len(codes))
     progress_bar.empty()
@@ -171,105 +186,89 @@ clean_str = ",".join(clean_codes)
 if st.button("🔄 刷新详细行情", type="primary", use_container_width=True):
     st.query_params["codes"] = clean_str
     
-    # --- 1. 获取指数数据 ---
-    # A. 日经225 (优先用 yfinance, 数据全)
-    n225_yf = fetch_market_data("^N225", start_str, is_index=True)
+    # 1. 获取数据
+    n225 = fetch_market_data("^N225", start_str, is_index=True)
+    etf  = fetch_market_data("1306.T", start_str, is_index=True)
     
-    # B. TOPIX (混合策略)
-    # 从 Google Finance 爬取真实点位 (解决 Yahoo 没数据问题)
-    topix_google = get_google_index_data("TOPIX:INDEXTOKYO")
-    # 从 Yahoo 获取 ETF 数据 (用来计算月度涨跌，因为爬虫很难爬历史数据)
-    topix_etf_yf = fetch_market_data("1306.T", start_str, is_index=True)
+    # 2. TOPIX 指数获取逻辑 (双保险)
+    # Plan A: Google
+    topix_data = get_google_index_data("TOPIX:INDEXTOKYO")
     
-    # --- 2. 获取个股 ---
+    # Plan B: Yahoo JP
+    if not topix_data:
+        # print("Google failed, trying Yahoo JP...")
+        yahoo_data = get_yahoo_jp_data("998405.T")
+        if yahoo_data:
+            topix_data = yahoo_data
+            # 如果是从 Yahoo JP 抓的，借用 ETF 的涨跌幅 (因为 Yahoo JP 爬涨跌幅很麻烦)
+            if etf["valid"]:
+                topix_data["daily_ret"] = etf["daily_ret"]
+        else:
+            # Plan C: Failed
+            topix_data = {"valid": False}
+
+    # 3. 个股
     df = fetch_portfolio_data(clean_codes, start_str)
     
-    # --- 界面：指数概况 ---
+    # --- 界面 ---
     st.caption(f"📊 市场基准 ({now.strftime('%H:%M')})")
-    
     c1, c2, c3 = st.columns(3)
     
-    # 1. 日经 225
     with c1:
-        if n225_yf["valid"]:
-            st.metric("日经225", f"{n225_yf['price']:,.0f}", f"{n225_yf['daily_ret']:+.2%} 日", delta_color="inverse")
-            st.caption(f"本月: {n225_yf['mtd_ret']:+.2%}") # 另起一行显示月度
+        if n225["valid"]:
+            st.metric("日经225 (日 | 月)", f"{n225['price']:,.0f}", f"{n225['daily_ret']:+.2%} 日", delta_color="inverse")
+            st.caption(f"月: {n225['mtd_ret']:+.1%}")
         else:
             st.metric("日经225", "N/A")
-    
-    # 2. TOPIX 指数 (真实点位)
-    with c2:
-        # 优先使用 Google 爬到的真实点位
-        if topix_google["valid"]:
-            current_val = topix_google['price']
-            daily_ret = topix_google['daily_ret']
-        else:
-            current_val = 0
-            daily_ret = 0
-        
-        # 月度涨跌幅：借用 ETF 的数据 (因为指数和 ETF 趋势一致)
-        mtd_ret_proxy = topix_etf_yf['mtd_ret'] if topix_etf_yf['valid'] else 0.0
-
-        if current_val > 0:
-            st.metric("TOPIX指数", f"{current_val:,.2f}", f"{daily_ret:+.2%} 日", delta_color="inverse")
-            st.caption(f"本月: {mtd_ret_proxy:+.2%}") # 借用 ETF 的月涨跌
-        else:
-            st.metric("TOPIX指数", "获取中...") # Google 爬虫偶尔会被挡
             
-    # 3. TOPIX ETF (1306)
+    with c2:
+        if topix_data and topix_data["valid"]:
+            # 借用 ETF 的月涨跌幅，因为爬虫很难爬到历史月线
+            mtd_proxy = etf["mtd_ret"] if etf["valid"] else 0.0
+            st.metric("TOPIX (日 | 月)", f"{topix_data['price']:,.2f}", f"{topix_data['daily_ret']:+.2%} 日", delta_color="inverse")
+            st.caption(f"月: {mtd_proxy:+.1%}")
+        else:
+            st.metric("TOPIX指数", "暂无数据") # 明确告知失败，不卡在"获取中"
+
     with c3:
-        if topix_etf_yf["valid"]:
-            st.metric("ETF 1306", f"{topix_etf_yf['price']:,.0f}", f"{topix_etf_yf['daily_ret']:+.2%} 日", delta_color="inverse")
-            st.caption(f"本月: {topix_etf_yf['mtd_ret']:+.2%}")
+        if etf["valid"]:
+            st.metric("ETF 1306 (日 | 月)", f"{etf['price']:,.0f}", f"{etf['daily_ret']:+.2%} 日", delta_color="inverse")
+            st.caption(f"月: {etf['mtd_ret']:+.1%}")
         else:
             st.metric("ETF 1306", "N/A")
 
     st.markdown("---")
 
-    # --- 界面：策略表现 ---
     if not df.empty:
         avg_ret = df['月收益'].mean()
         total_ret = avg_ret * leverage
-        
-        # Alpha: 策略收益 - TOPIX(ETF)月收益
-        bench_ret = topix_etf_yf['mtd_ret'] if topix_etf_yf['valid'] else 0
+        bench_ret = etf['mtd_ret'] if etf['valid'] else 0
         alpha = total_ret - bench_ret
         
         st.caption("📈 组合表现 (本月累计)")
         sc1, sc2 = st.columns(2)
-        with sc1:
-             st.metric("策略总收益 (杠杆后)", f"{total_ret:+.2%}", delta_color="inverse")
-        with sc2:
-             st.metric("相对 TOPIX (Alpha)", f"{alpha:+.2%}", delta_color="off")
+        with sc1: st.metric("策略总收益 (杠杆后)", f"{total_ret:+.2%}", delta_color="inverse")
+        with sc2: st.metric("相对 TOPIX (Alpha)", f"{alpha:+.2%}", delta_color="off")
              
         st.divider()
 
-        # --- 界面：个股列表 ---
         st.subheader(f"持仓详情 ({len(df)}只)")
         df = df.sort_values(by='月收益', ascending=False)
         
         for _, row in df.iterrows():
-            name = row['名称']
-            code = row['代码']
-            price = row['现价']
-            cost = row['买入价']
-            d_ret = row['日收益']
-            m_ret = row['月收益']
-            
-            c_day = "red" if d_ret > 0 else "green"
-            c_mon = "red" if m_ret > 0 else "green"
-            
+            c_day = "red" if row['日收益'] > 0 else "green"
+            c_mon = "red" if row['月收益'] > 0 else "green"
             with st.container():
-                st.markdown(f"**{code} | {name}**")
+                st.markdown(f"**{row['代码']} | {row['名称']}**")
                 col1, col2, col3 = st.columns([1.2, 1, 1])
                 with col1:
-                    st.write(f"¥{price:,.0f}")
-                    st.caption(f"本:¥{cost:,.0f}")
+                    st.write(f"¥{row['现价']:,.0f}")
+                    st.caption(f"本:¥{row['买入价']:,.0f}")
                 with col2:
-                    st.markdown(f":{c_day}[{d_ret:+.2%}]")
+                    st.markdown(f":{c_day}[{row['日收益']:+.2%}]")
                     st.caption("今日")
                 with col3:
-                    st.markdown(f":{c_mon}[**{m_ret:+.2%}**]")
+                    st.markdown(f":{c_mon}[**{row['月收益']:+.2%}**]")
                     st.caption("本月")
                 st.divider()
     else:
