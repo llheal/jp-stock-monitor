@@ -32,94 +32,98 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心爬虫：Yahoo JP (基于提供的 HTML 修正) ---
-def get_topix_yahoo_jp_v2():
+# --- 核心：Topix 获取逻辑 (三级容灾) ---
+def get_topix_data_robust(month_start):
     """
-    Target Logic:
-    1. Find parent span: class includes "PriceBoard__price__1V0k"
-    2. Find child span: class includes "StyledNumber__value__3rXW"
+    策略：
+    1. 爬虫 (Yahoo Title) -> 失败?
+    2. yfinance (^TOPX) -> 失败?
+    3. yfinance (1306.T - ETF) -> 作为最终兜底，涨跌幅近似
     """
-    url = "https://finance.yahoo.co.jp/quote/998405.T"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Referer": "https://finance.yahoo.co.jp/",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
-    }
-    
-    try:
-        r = requests.get(url, headers=headers, timeout=3)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.content, "html.parser")
-            
-            # --- 精准定位策略 ---
-            # 1. 找到包含 "PriceBoard__price__1V0k" 的父级 span
-            #    BeautifulSoup 的 class_ 查找是部分匹配的，只要列表中包含即可
-            parent_span = soup.find("span", class_="PriceBoard__price__1V0k")
-            
-            if parent_span:
-                # 2. 在父级中找数值 span
-                value_span = parent_span.find("span", class_="StyledNumber__value__3rXW")
-                if value_span:
-                    price_str = value_span.text.strip().replace(",", "")
-                    return float(price_str)
-                    
-    except Exception as e:
-        print(f"Yahoo Parse Error: {e}")
-        return None
-    return None
+    price = None
+    open_price = None
+    source = "Init"
 
-# --- 综合数据获取 ---
-def get_topix_data_combined(month_start):
-    # 1. 尝试爬取 Yahoo JP
-    current_price = get_topix_yahoo_jp_v2()
-    source = "Yahoo! JP (Live)"
-    
-    # 2. 失败则回退到 yfinance
-    if current_price is None:
+    # --- 方案 A: Yahoo JP 爬虫 (仅尝试 Title，成功率最高) ---
+    try:
+        url = "https://finance.yahoo.co.jp/quote/998405.T"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=2)
+        if r.status_code == 200:
+            # 针对 Title 进行正则匹配，这比 class 稳定得多
+            # 网页 Title 通常是: "トピックス【998405.T】：2,600.50..."
+            soup = BeautifulSoup(r.content, "html.parser")
+            if soup.title:
+                match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', soup.title.string)
+                if match:
+                    price = float(match.group(1).replace(',', ''))
+                    source = "Yahoo! JP (Live)"
+    except:
+        pass
+
+    # --- 方案 B: yfinance ^TOPX (指数本身) ---
+    if price is None:
         try:
             t = yf.Ticker("^TOPX")
-            fi = t.fast_info
-            if fi.last_price:
-                current_price = fi.last_price
-                source = "Yahoo Finance (Backup)"
+            # 尝试 fast_info
+            if t.fast_info.last_price:
+                price = t.fast_info.last_price
+                source = "Yahoo Finance (^TOPX)"
             else:
-                # 如果 fast_info 拿不到，拿历史数据最后一行
+                # 尝试 history
                 hist = t.history(period="1d")
                 if not hist.empty:
-                    current_price = hist.iloc[-1]['Close']
-                    source = "Historical Close (Delayed)"
+                    price = hist.iloc[-1]['Close']
+                    source = "YF History (^TOPX)"
         except:
             pass
 
-    # 3. 获取月初开盘 (yfinance)
-    month_open = None
+    # --- 方案 C: yfinance 1306.T (ETF 替身) ---
+    # 如果指数彻底拿不到，我们用 ETF 的涨跌幅来近似
+    use_etf_proxy = False
+    if price is None:
+        try:
+            etf = yf.Ticker("1306.T") # 野村 TOPIX ETF
+            if etf.fast_info.last_price:
+                price = etf.fast_info.last_price
+                source = "ETF Proxy (1306.T)"
+                use_etf_proxy = True
+        except:
+            pass
+
+    # --- 获取月初基准 (计算月涨跌用) ---
+    # 必须与当前价的标的对应。如果是 ETF 替身，就要拿 ETF 的月初价。
+    target_symbol = "1306.T" if use_etf_proxy else "^TOPX"
+    
     try:
-        hist = yf.Ticker("^TOPX").history(start=month_start, interval="1d")
-        if not hist.empty:
-            month_open = hist.iloc[0]['Open']
-            # 终极兜底
-            if current_price is None:
-                current_price = hist.iloc[-1]['Close']
+        hist_m = yf.Ticker(target_symbol).history(start=month_start, interval="1d")
+        if not hist_m.empty:
+            open_price = hist_m.iloc[0]['Open']
+            # 终极兜底：如果当前价还是 None，就用历史最后收盘价
+            if price is None:
+                price = hist_m.iloc[-1]['Close']
+                source = f"Historical Close ({target_symbol})"
     except:
         pass
         
-    return current_price, month_open, source
+    return price, open_price, source
 
-# --- 核心计算逻辑 ---
+# --- 主计算逻辑 ---
 def calculate_data(user_input_str, leverage_ratio):
     month_start = get_month_start_date()
     
-    # 1. Topix
-    tp_curr, tp_open, tp_src = get_topix_data_combined(month_start)
+    # 1. 获取 Topix (容灾版)
+    tp_curr, tp_open, tp_src = get_topix_data_robust(month_start)
     
-    if tp_curr and tp_open:
+    if tp_curr and tp_open and tp_open > 0:
         topix_pct = (tp_curr - tp_open) / tp_open
     else:
         topix_pct = 0.0
-        tp_curr = 0.0
+        tp_curr = 0.0 # 避免 None 报错
 
-    # 2. 日经225
+    # 2. 获取日经225
     nikkei_pct = 0.0
     try:
         nk = yf.Ticker("^N225")
@@ -131,7 +135,7 @@ def calculate_data(user_input_str, leverage_ratio):
     except:
         pass
 
-    # 3. 个股
+    # 3. 个股处理
     raw_items = [x.strip() for x in re.split(r'[,\n]', user_input_str) if x.strip()]
     individual_returns = [] 
     table_rows = []
@@ -189,13 +193,13 @@ st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在解析数据...'):
+    with st.spinner('正在获取数据 (含容灾处理)...'):
         df, port_ret, alpha, nk_pct, tp_pct, tp_val, tp_src = calculate_data(user_input, leverage)
     
     if not df.empty:
         col1, col2, col3, col4 = st.columns(4)
         
-        # 颜色逻辑: inverse (红涨绿跌)
+        # 颜色: inverse (红涨绿跌)
         col1.metric(f"📊 组合收益 ({leverage}x)", f"{port_ret:+.2%}", 
                     delta=f"{port_ret:+.2%}", delta_color="inverse")
         
@@ -205,21 +209,30 @@ if st.button("🔄 刷新数据", use_container_width=True):
         col3.metric("🇯🇵 日经225 (月)", f"{nk_pct:+.2%}", 
                     delta=f"{nk_pct:+.2%}", delta_color="inverse")
         
-        # Topix 显示
-        col4.metric("🇯🇵 Topix (月)", f"{tp_pct:+.2%}", 
-                    delta=f"{tp_pct:+.2%}", delta_color="inverse",
-                    help=f"点数: {tp_val:,.2f}\n来源: {tp_src}")
+        # Topix 逻辑处理
+        if tp_val > 0:
+            topix_str = f"{tp_pct:+.2%}"
+            topix_delta = f"{tp_pct:+.2%}"
+            topix_help = f"点数: {tp_val:,.2f}\n来源: {tp_src}"
+            # 如果用了 ETF 替身，提示一下
+            if "ETF Proxy" in tp_src:
+                topix_help += "\n⚠️ 注意: 指数获取失败，使用 1306.T (ETF) 近似涨跌幅。"
+        else:
+            topix_str = "N/A"
+            topix_delta = None
+            topix_help = f"数据获取完全失败\n来源: {tp_src}"
+
+        col4.metric("🇯🇵 Topix (月)", topix_str, 
+                    delta=topix_delta, delta_color="inverse",
+                    help=topix_help)
         
         st.divider()
         
         # 表格
         st.caption("📋 个股表现 (原始涨跌幅)")
-        
         def color_arrow(val):
-            if val > 0:
-                return 'color: #d32f2f; font-weight: bold' # Red
-            elif val < 0:
-                return 'color: #2e7d32; font-weight: bold' # Green
+            if val > 0: return 'color: #d32f2f; font-weight: bold'
+            elif val < 0: return 'color: #2e7d32; font-weight: bold'
             return 'color: gray'
 
         styled_df = df.style.format({
@@ -230,9 +243,8 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # 调试提示
-        if "Yahoo! JP" not in tp_src:
-            st.warning(f"⚠️ Topix 数据源已降级为: {tp_src}。说明 Streamlit 服务器 IP 被 Yahoo Japan 暂时拦截。")
+        # 底部状态栏
+        st.caption(f"Topix 数据源状态: {tp_src}")
         
     else:
-        st.error("无法获取数据。")
+        st.error("无数据。")
