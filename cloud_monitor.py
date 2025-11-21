@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import re
 
@@ -83,7 +83,8 @@ def get_topix_value_minkabu():
 
 # --- 核心数据获取 ---
 def calculate_data(user_input_str, leverage_ratio):
-    month_start = get_month_start_date()
+    # 获取本月第一天用于计算月收益
+    month_start_str = get_month_start_date() 
     
     # ==========================================
     # 1. Topix 混合逻辑 (Value: Minkabu, %: ETF)
@@ -107,11 +108,16 @@ def calculate_data(user_input_str, leverage_ratio):
         if etf_curr and etf_prev:
             tp_day_pct = (etf_curr - etf_prev) / etf_prev
             
-        hist = etf.history(start=month_start, interval="1d")
+        # 获取过去2个月数据以确保覆盖月初
+        hist = etf.history(period="2mo", interval="1d")
+        
         if not hist.empty:
-            etf_month_open = hist.iloc[0]['Open']
-            if etf_curr:
-                tp_month_pct = (etf_curr - etf_month_open) / etf_month_open
+            # 筛选出本月的数据
+            curr_month_data = hist[hist.index.strftime('%Y-%m-%d') >= month_start_str]
+            if not curr_month_data.empty:
+                etf_month_open = curr_month_data.iloc[0]['Open']
+                if etf_curr:
+                    tp_month_pct = (etf_curr - etf_month_open) / etf_month_open
     except:
         pass
 
@@ -130,11 +136,13 @@ def calculate_data(user_input_str, leverage_ratio):
         if nk_curr and nk_prev:
             nk_day_pct = (nk_curr - nk_prev) / nk_prev
             
-        nk_hist = nk.history(start=month_start, interval="1d")
+        nk_hist = nk.history(period="2mo", interval="1d")
         if not nk_hist.empty:
-            nk_month_open = nk_hist.iloc[0]['Open']
-            if nk_curr:
-                nk_month_pct = (nk_curr - nk_month_open) / nk_month_open
+            curr_month_nk = nk_hist[nk_hist.index.strftime('%Y-%m-%d') >= month_start_str]
+            if not curr_month_nk.empty:
+                nk_month_open = curr_month_nk.iloc[0]['Open']
+                if nk_curr:
+                    nk_month_pct = (nk_curr - nk_month_open) / nk_month_open
     except:
         pass
 
@@ -157,26 +165,50 @@ def calculate_data(user_input_str, leverage_ratio):
             current_price = fi.last_price
             prev_close = fi.previous_close
             
-            hist = stock.history(start=month_start, interval="1d")
+            # 获取2个月数据，既能覆盖本月，也能覆盖过去30天
+            hist = stock.history(period="2mo", interval="1d")
+            
+            day_change = 0.0
+            month_change = 0.0
+            avg_turnover_30d = 0.0
             
             if not hist.empty and current_price:
-                month_open = hist.iloc[0]['Open']
+                # --- 1. 计算月涨跌幅 ---
+                curr_month_hist = hist[hist.index.strftime('%Y-%m-%d') >= month_start_str]
+                
+                if not curr_month_hist.empty:
+                    month_open = curr_month_hist.iloc[0]['Open']
+                else:
+                    month_open = hist.iloc[0]['Open']
+                
                 day_change = (current_price - prev_close) / prev_close if prev_close else 0
                 month_change = (current_price - month_open) / month_open if month_open else 0
-            else:
-                month_open = prev_close
-                day_change = 0.0
-                month_change = 0.0
-            
+                
+                # --- 2. 计算近30天平均成交额 ---
+                # 计算每日成交额
+                hist['Turnover'] = hist['Close'] * hist['Volume']
+                
+                # 确定30天前的截止日期
+                last_date = hist.index.max()
+                cutoff_date = last_date - timedelta(days=30)
+                
+                # 筛选最近30天的数据
+                recent_30d_mask = hist.index > cutoff_date
+                if recent_30d_mask.any():
+                    # 计算平均值并转换为 亿
+                    avg_turnover_raw = hist.loc[recent_30d_mask, 'Turnover'].mean()
+                    avg_turnover_30d = avg_turnover_raw / 100_000_000 # 1亿 = 10^8
+                
             individual_returns.append(month_change)
             
             table_rows.append({
                 "代码": code,
                 "当前价": current_price,
                 "日涨跌幅": day_change,
-                "月涨跌幅": month_change
+                "月涨跌幅": month_change,
+                "30日均额(亿)": avg_turnover_30d
             })
-        except:
+        except Exception as e:
             pass 
         bar.progress((i + 1) / max(len(raw_items), 1))
         
@@ -194,7 +226,6 @@ def calculate_data(user_input_str, leverage_ratio):
     # 创建并排序 DataFrame
     df = pd.DataFrame(table_rows)
     if not df.empty:
-        # --- 关键修改：按月涨跌幅降序排序 ---
         df = df.sort_values(by='月涨跌幅', ascending=False)
 
     return {
@@ -265,10 +296,12 @@ if st.button("🔄 刷新数据", use_container_width=True):
             elif val < 0: return 'color: #2e7d32; font-weight: bold'
             return 'color: gray'
 
+        # 格式化：成交额保留两位小数
         styled_df = data["df"].style.format({
             "当前价": "{:,.1f}",
             "日涨跌幅": "{:+.2%}",
-            "月涨跌幅": "{:+.2%}"
+            "月涨跌幅": "{:+.2%}",
+            "30日均额(亿)": "{:,.2f}"
         }).map(color_arrow, subset=['日涨跌幅', '月涨跌幅'])
         
         # 动态高度
