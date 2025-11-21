@@ -32,98 +32,85 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心：Topix 获取逻辑 (三级容灾) ---
-def get_topix_data_robust(month_start):
+# --- 核心爬虫：Kabutan (株探) ---
+def get_topix_kabutan():
     """
-    策略：
-    1. 爬虫 (Yahoo Title) -> 失败?
-    2. yfinance (^TOPX) -> 失败?
-    3. yfinance (1306.T - ETF) -> 作为最终兜底，涨跌幅近似
+    从 Kabutan 爬取 Topix (代码 0010)
+    URL: https://kabutan.jp/stock/?code=0010
     """
-    price = None
-    open_price = None
-    source = "Init"
-
-    # --- 方案 A: Yahoo JP 爬虫 (仅尝试 Title，成功率最高) ---
-    try:
-        url = "https://finance.yahoo.co.jp/quote/998405.T"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        r = requests.get(url, headers=headers, timeout=2)
-        if r.status_code == 200:
-            # 针对 Title 进行正则匹配，这比 class 稳定得多
-            # 网页 Title 通常是: "トピックス【998405.T】：2,600.50..."
-            soup = BeautifulSoup(r.content, "html.parser")
-            if soup.title:
-                match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', soup.title.string)
-                if match:
-                    price = float(match.group(1).replace(',', ''))
-                    source = "Yahoo! JP (Live)"
-    except:
-        pass
-
-    # --- 方案 B: yfinance ^TOPX (指数本身) ---
-    if price is None:
-        try:
-            t = yf.Ticker("^TOPX")
-            # 尝试 fast_info
-            if t.fast_info.last_price:
-                price = t.fast_info.last_price
-                source = "Yahoo Finance (^TOPX)"
-            else:
-                # 尝试 history
-                hist = t.history(period="1d")
-                if not hist.empty:
-                    price = hist.iloc[-1]['Close']
-                    source = "YF History (^TOPX)"
-        except:
-            pass
-
-    # --- 方案 C: yfinance 1306.T (ETF 替身) ---
-    # 如果指数彻底拿不到，我们用 ETF 的涨跌幅来近似
-    use_etf_proxy = False
-    if price is None:
-        try:
-            etf = yf.Ticker("1306.T") # 野村 TOPIX ETF
-            if etf.fast_info.last_price:
-                price = etf.fast_info.last_price
-                source = "ETF Proxy (1306.T)"
-                use_etf_proxy = True
-        except:
-            pass
-
-    # --- 获取月初基准 (计算月涨跌用) ---
-    # 必须与当前价的标的对应。如果是 ETF 替身，就要拿 ETF 的月初价。
-    target_symbol = "1306.T" if use_etf_proxy else "^TOPX"
+    url = "https://kabutan.jp/stock/?code=0010"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     
     try:
-        hist_m = yf.Ticker(target_symbol).history(start=month_start, interval="1d")
-        if not hist_m.empty:
-            open_price = hist_m.iloc[0]['Open']
-            # 终极兜底：如果当前价还是 None，就用历史最后收盘价
-            if price is None:
-                price = hist_m.iloc[-1]['Close']
-                source = f"Historical Close ({target_symbol})"
+        r = requests.get(url, headers=headers, timeout=4)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.content, "html.parser")
+            
+            # Kabutan 的价格通常在 span class="kabuka" 中
+            # 结构: <span class="kabuka">2,698.50</span>
+            price_span = soup.find("span", class_="kabuka")
+            
+            if price_span:
+                price_str = price_span.text.strip().replace(",", "")
+                return float(price_str)
+                
+    except Exception as e:
+        print(f"Kabutan Error: {e}")
+        return None
+    return None
+
+# --- 综合数据获取 ---
+def get_topix_data_combined(month_start):
+    # 1. 优先尝试 Kabutan (轻量，成功率高)
+    current_price = get_topix_kabutan()
+    source = "Kabutan (Live)"
+    
+    # 2. 失败则回退到 yfinance ^TOPX
+    if current_price is None:
+        try:
+            t = yf.Ticker("^TOPX")
+            fi = t.fast_info
+            if fi.last_price:
+                current_price = fi.last_price
+                source = "Yahoo Finance (Backup)"
+            else:
+                hist = t.history(period="1d")
+                if not hist.empty:
+                    current_price = hist.iloc[-1]['Close']
+                    source = "Historical Close (Delayed)"
+        except:
+            pass
+
+    # 3. 获取月初开盘 (始终用 yfinance 历史数据)
+    month_open = None
+    try:
+        hist = yf.Ticker("^TOPX").history(start=month_start, interval="1d")
+        if not hist.empty:
+            month_open = hist.iloc[0]['Open']
+            # 终极兜底
+            if current_price is None:
+                current_price = hist.iloc[-1]['Close']
     except:
         pass
         
-    return price, open_price, source
+    return current_price, month_open, source
 
-# --- 主计算逻辑 ---
+# --- 核心计算逻辑 ---
 def calculate_data(user_input_str, leverage_ratio):
     month_start = get_month_start_date()
     
-    # 1. 获取 Topix (容灾版)
-    tp_curr, tp_open, tp_src = get_topix_data_robust(month_start)
+    # 1. Topix
+    tp_curr, tp_open, tp_src = get_topix_data_combined(month_start)
     
     if tp_curr and tp_open and tp_open > 0:
         topix_pct = (tp_curr - tp_open) / tp_open
     else:
         topix_pct = 0.0
-        tp_curr = 0.0 # 避免 None 报错
+        tp_curr = 0.0
 
-    # 2. 获取日经225
+    # 2. 日经225
     nikkei_pct = 0.0
     try:
         nk = yf.Ticker("^N225")
@@ -135,7 +122,7 @@ def calculate_data(user_input_str, leverage_ratio):
     except:
         pass
 
-    # 3. 个股处理
+    # 3. 个股
     raw_items = [x.strip() for x in re.split(r'[,\n]', user_input_str) if x.strip()]
     individual_returns = [] 
     table_rows = []
@@ -193,13 +180,13 @@ st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在获取数据 (含容灾处理)...'):
+    with st.spinner('正在从 Kabutan (株探) 获取数据...'):
         df, port_ret, alpha, nk_pct, tp_pct, tp_val, tp_src = calculate_data(user_input, leverage)
     
     if not df.empty:
         col1, col2, col3, col4 = st.columns(4)
         
-        # 颜色: inverse (红涨绿跌)
+        # 颜色逻辑: inverse (红涨绿跌)
         col1.metric(f"📊 组合收益 ({leverage}x)", f"{port_ret:+.2%}", 
                     delta=f"{port_ret:+.2%}", delta_color="inverse")
         
@@ -209,30 +196,21 @@ if st.button("🔄 刷新数据", use_container_width=True):
         col3.metric("🇯🇵 日经225 (月)", f"{nk_pct:+.2%}", 
                     delta=f"{nk_pct:+.2%}", delta_color="inverse")
         
-        # Topix 逻辑处理
-        if tp_val > 0:
-            topix_str = f"{tp_pct:+.2%}"
-            topix_delta = f"{tp_pct:+.2%}"
-            topix_help = f"点数: {tp_val:,.2f}\n来源: {tp_src}"
-            # 如果用了 ETF 替身，提示一下
-            if "ETF Proxy" in tp_src:
-                topix_help += "\n⚠️ 注意: 指数获取失败，使用 1306.T (ETF) 近似涨跌幅。"
-        else:
-            topix_str = "N/A"
-            topix_delta = None
-            topix_help = f"数据获取完全失败\n来源: {tp_src}"
-
-        col4.metric("🇯🇵 Topix (月)", topix_str, 
-                    delta=topix_delta, delta_color="inverse",
-                    help=topix_help)
+        # Topix 显示
+        col4.metric("🇯🇵 Topix (月)", f"{tp_pct:+.2%}", 
+                    delta=f"{tp_pct:+.2%}", delta_color="inverse",
+                    help=f"点数: {tp_val:,.2f}\n来源: {tp_src}")
         
         st.divider()
         
         # 表格
         st.caption("📋 个股表现 (原始涨跌幅)")
+        
         def color_arrow(val):
-            if val > 0: return 'color: #d32f2f; font-weight: bold'
-            elif val < 0: return 'color: #2e7d32; font-weight: bold'
+            if val > 0:
+                return 'color: #d32f2f; font-weight: bold' # Red
+            elif val < 0:
+                return 'color: #2e7d32; font-weight: bold' # Green
             return 'color: gray'
 
         styled_df = df.style.format({
@@ -243,8 +221,5 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
-        # 底部状态栏
-        st.caption(f"Topix 数据源状态: {tp_src}")
-        
     else:
-        st.error("无数据。")
+        st.error("无法获取数据。")
