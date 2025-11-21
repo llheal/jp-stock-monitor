@@ -32,13 +32,14 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心爬虫：Kabutan (株探) ---
-def get_topix_kabutan():
+# --- 核心爬虫：Minkabu (みんかぶ) ---
+def get_topix_minkabu():
     """
-    从 Kabutan 爬取 Topix (代码 0010)
-    URL: https://kabutan.jp/stock/?code=0010
+    从 Minkabu 爬取 Topix
+    URL: https://minkabu.jp/stock/KSISU1000
+    Target: <div class="stock_price">3,289.<span class="decimal">64</span></div>
     """
-    url = "https://kabutan.jp/stock/?code=0010"
+    url = "https://minkabu.jp/stock/KSISU1000"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -48,26 +49,32 @@ def get_topix_kabutan():
         if r.status_code == 200:
             soup = BeautifulSoup(r.content, "html.parser")
             
-            # Kabutan 的价格通常在 span class="kabuka" 中
-            # 结构: <span class="kabuka">2,698.50</span>
-            price_span = soup.find("span", class_="kabuka")
+            # 定位 <div class="stock_price">
+            price_div = soup.find("div", class_="stock_price")
             
-            if price_span:
-                price_str = price_span.text.strip().replace(",", "")
-                return float(price_str)
+            if price_div:
+                # get_text() 会自动获取 div 下所有子节点的文本并拼接
+                # 例如: "3,289." + "64" -> "3,289.64"
+                # strip=True 去除首尾换行符
+                raw_text = price_div.get_text(strip=True)
+                
+                # 清洗数据: 去除可能存在的换行、空格、逗号
+                clean_text = raw_text.replace('\n', '').replace(' ', '').replace(',', '')
+                
+                return float(clean_text)
                 
     except Exception as e:
-        print(f"Kabutan Error: {e}")
+        print(f"Minkabu Error: {e}")
         return None
     return None
 
 # --- 综合数据获取 ---
 def get_topix_data_combined(month_start):
-    # 1. 优先尝试 Kabutan (轻量，成功率高)
-    current_price = get_topix_kabutan()
-    source = "Kabutan (Live)"
+    # 1. 优先尝试 Minkabu
+    current_price = get_topix_minkabu()
+    source = "Minkabu (Live)"
     
-    # 2. 失败则回退到 yfinance ^TOPX
+    # 2. 失败则回退到 yfinance ^TOPX (容灾)
     if current_price is None:
         try:
             t = yf.Ticker("^TOPX")
@@ -180,7 +187,7 @@ st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在从 Kabutan (株探) 获取数据...'):
+    with st.spinner('正在从 Minkabu 获取数据...'):
         df, port_ret, alpha, nk_pct, tp_pct, tp_val, tp_src = calculate_data(user_input, leverage)
     
     if not df.empty:
@@ -220,6 +227,9 @@ if st.button("🔄 刷新数据", use_container_width=True):
         }).map(color_arrow, subset=['日涨跌幅', '月涨跌幅'])
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        
+        if "Minkabu" not in tp_src:
+             st.warning(f"⚠️ Minkabu 访问受限，当前使用备用源: {tp_src}")
         
     else:
         st.error("无法获取数据。")
