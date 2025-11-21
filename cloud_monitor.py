@@ -1,11 +1,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
-import re
 
 # --- 页面配置 ---
 st.set_page_config(page_title="日股Alpha监控", page_icon="🇯🇵", layout="wide")
@@ -19,7 +16,7 @@ else:
 
 # --- 侧边栏 ---
 st.sidebar.header("⚙️ 投资组合配置")
-st.sidebar.caption("格式：代码:股数。默认 100 股。")
+st.sidebar.caption("格式：代码:股数 (用于计算加权收益率，股数不会显示在界面上)。")
 user_input = st.sidebar.text_area("持仓列表", value=initial_value, height=150)
 
 # --- 辅助函数 ---
@@ -28,170 +25,148 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-def get_topix_from_yahoo_jp():
-    """从 Yahoo Japan 爬取 Topix 实时数据 (爬取 Title 标签)"""
-    url = "https://finance.yahoo.co.jp/quote/000001.O"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=4)
-        soup = BeautifulSoup(r.content, "html.parser")
-        title_text = soup.title.string if soup.title else ""
-        match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', title_text)
-        if match:
-            return float(match.group(1).replace(',', ''))
-        return None
-    except Exception:
-        return None
-
-def get_topix_month_open():
-    """获取 Topix 本月开盘价 (yfinance)"""
-    try:
-        hist = yf.Ticker("^TOPX").history(start=get_month_start_date(), interval="1d")
-        if not hist.empty:
-            return hist.iloc[0]['Open']
-        return None
-    except:
-        return None
-
 # --- 核心逻辑 ---
-def calculate_portfolio(user_input_str):
-    # 1. 解析用户输入
-    raw_items = [x.strip() for x in user_input_str.replace('，', ',').split(',') if x.strip()]
-    portfolio = []
-    for item in raw_items:
-        parts = item.split(':')
-        code = parts[0].strip()
-        shares = float(parts[1]) if len(parts) > 1 else 100.0
-        yf_ticker = f"{code}.T" if code.isdigit() else code
-        portfolio.append({"code": code, "yf_ticker": yf_ticker, "shares": shares})
-    
-    if not portfolio:
-        return None, None, None
-
-    # 2. 获取 Topix 数据
-    topix_current = get_topix_from_yahoo_jp()
-    topix_open = get_topix_month_open()
-    
-    # 兜底逻辑
-    if topix_current is None and topix_open: 
-        topix_current = topix_open 
-
-    # 计算 Topix 涨跌
-    if topix_current and topix_open:
-        topix_ret = (topix_current - topix_open) / topix_open
-    else:
-        topix_ret = 0.0
-
-    topix_data = {
-        "current": topix_current,
-        "month_open": topix_open,
-        "topix_return": topix_ret  # <--- 修复点：键名保持一致
-    }
-
-    # 3. 计算个股与组合
-    stock_data_list = []
-    total_current_value = 0.0
-    total_open_value = 0.0
+def calculate_data(user_input_str):
     month_start = get_month_start_date()
     
+    # 1. 获取指数数据 (Nikkei & Topix)
+    # ^N225: 日经, 998405.T: Topix (按用户指定)
+    indices_map = {
+        "Nikkei 225": "^N225",
+        "Topix": "998405.T" 
+    }
+    indices_data = {}
+    
+    for name, ticker_code in indices_map.items():
+        try:
+            idx = yf.Ticker(ticker_code)
+            # 获取历史数据以计算月度
+            hist = idx.history(start=month_start, interval="1d")
+            if not hist.empty:
+                current = hist.iloc[-1]['Close'] # 使用最新的收盘或当前价
+                open_price = hist.iloc[0]['Open']
+                pct = (current - open_price) / open_price
+                indices_data[name] = pct
+            else:
+                # 如果 998405.T 获取失败，尝试备用代码 ^TOPX (仅针对 Topix)
+                if name == "Topix":
+                    backup = yf.Ticker("^TOPX").history(start=month_start, interval="1d")
+                    if not backup.empty:
+                        current = backup.iloc[-1]['Close']
+                        open_price = backup.iloc[0]['Open']
+                        pct = (current - open_price) / open_price
+                        indices_data[name] = pct
+                    else:
+                        indices_data[name] = 0.0
+                else:
+                    indices_data[name] = 0.0
+        except:
+            indices_data[name] = 0.0
+
+    # 2. 解析用户持仓
+    raw_items = [x.strip() for x in user_input_str.replace('，', ',').split(',') if x.strip()]
+    portfolio = []
+    
+    total_current_val = 0.0
+    total_open_val = 0.0
+    
+    table_rows = []
+    
+    # 进度条
     bar = st.progress(0)
     
-    for i, p in enumerate(portfolio):
+    for i, item in enumerate(raw_items):
         try:
-            ticker = yf.Ticker(p["yf_ticker"])
-            fi = ticker.fast_info
+            parts = item.split(':')
+            code = parts[0].strip()
+            # 默认100股，仅用于后台计算权重，不显示
+            shares = float(parts[1]) if len(parts) > 1 else 100.0 
+            
+            yf_ticker = f"{code}.T" if code.isdigit() else code
+            
+            stock = yf.Ticker(yf_ticker)
+            
+            # 获取数据
+            fi = stock.fast_info
             current_price = fi.last_price
             prev_close = fi.previous_close
             
-            hist = ticker.history(start=month_start, interval="1d")
-            month_open = hist.iloc[0]['Open'] if not hist.empty else prev_close
+            hist = stock.history(start=month_start, interval="1d")
+            if not hist.empty:
+                month_open = hist.iloc[0]['Open']
+            else:
+                month_open = prev_close
             
-            val_current = current_price * p["shares"]
-            val_open = month_open * p["shares"]
-            total_current_value += val_current
-            total_open_value += val_open
+            # 计算
+            val_current = current_price * shares
+            val_open = month_open * shares
             
-            month_change = (current_price - month_open) / month_open if month_open else 0
+            total_current_val += val_current
+            total_open_val += val_open
+            
             day_change = (current_price - prev_close) / prev_close if prev_close else 0
+            month_change = (current_price - month_open) / month_open if month_open else 0
             
-            stock_data_list.append({
-                "代码": p["code"],
-                "持有股数": p["shares"],
+            table_rows.append({
+                "代码": code,
                 "当前价": current_price,
-                "月初开盘": month_open,
                 "日涨跌幅": day_change,
-                "月涨跌幅": month_change,
-                "持仓市值": val_current,
-                "月度盈亏": val_current - val_open
+                "月涨跌幅": month_change
             })
+            
         except Exception as e:
-            print(f"Error {p['code']}: {e}")
+            pass
         
-        bar.progress((i + 1) / len(portfolio))
-    
+        bar.progress((i + 1) / len(raw_items))
+        
     bar.empty()
     
-    # 4. 汇总计算
-    if total_open_value > 0:
-        portfolio_month_return = (total_current_value - total_open_value) / total_open_value
+    # 3. 计算组合总收益率
+    if total_open_val > 0:
+        port_return = (total_current_val - total_open_val) / total_open_val
     else:
-        portfolio_month_return = 0.0
+        port_return = 0.0
         
-    alpha = portfolio_month_return - topix_data["topix_return"]
+    # 4. 计算 Alpha (组合 - Topix)
+    alpha = port_return - indices_data.get("Topix", 0.0)
     
-    summary = {
-        "port_return": portfolio_month_return,
-        "alpha": alpha,
-        "total_pnl": total_current_value - total_open_value,
-        "total_val": total_current_value
-    }
-    
-    return pd.DataFrame(stock_data_list), summary, topix_data
+    return pd.DataFrame(table_rows), port_return, alpha, indices_data
 
 # --- 主界面 ---
-st.title("🇯🇵 日股实盘 & Alpha 监控")
+st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在计算数据...'):
-        df, summary, topix = calculate_portfolio(user_input)
+    with st.spinner('正在计算收益率...'):
+        df, port_ret, alpha, indices = calculate_data(user_input)
     
-    if df is not None and not df.empty:
-        # 1. 指标卡片
+    if not df.empty:
+        # --- 1. 纯百分比指标卡片 ---
         col1, col2, col3, col4 = st.columns(4)
         
-        col1.metric("📊 组合月度收益", f"{summary['port_return']:.2%}", 
-                    delta=f"{summary['total_pnl']:,.0f} 円")
+        # 组合收益
+        col1.metric("📊 组合月收益", f"{port_ret:+.2%}")
         
-        # 修复点：现在这里的键名 topix_return 可以在字典里找到了
-        col2.metric("🇯🇵 Topix 月度表现", f"{topix['topix_return']:.2%}")
+        # Alpha
+        col2.metric("🚀 Alpha (vs Topix)", f"{alpha:+.2%}", 
+                    delta_color="normal" if alpha > 0 else "inverse")
         
-        alpha_val = summary['alpha']
-        col3.metric("🚀 Alpha (超额收益)", f"{alpha_val:+.2%}", 
-                    delta_color="normal" if alpha_val > 0 else "inverse")
-        
-        col4.metric("💰 持仓总市值", f"¥{summary['total_val']:,.0f}")
+        # 指数参照
+        col3.metric("🇯🇵 日经225 (月)", f"{indices['Nikkei 225']:+.2%}")
+        col4.metric("🇯🇵 Topix (月)", f"{indices['Topix']:+.2%}")
         
         st.divider()
         
-        # 2. 表格展示
+        # --- 2. 表格 (只含价格与百分比) ---
+        # 样式设置
         styled_df = df.style.format({
             "当前价": "{:,.1f}",
-            "月初开盘": "{:,.1f}",
-            "持有股数": "{:,.0f}",
-            "持仓市值": "¥{:,.0f}",
-            "月度盈亏": "{:+,.0f}",
             "日涨跌幅": "{:+.2%}",
             "月涨跌幅": "{:+.2%}"
         }).map(lambda x: 'color: #d32f2f; font-weight: bold' if x > 0 else ('color: #2e7d32; font-weight: bold' if x < 0 else 'color: gray'), 
-               subset=['日涨跌幅', '月涨跌幅', '月度盈亏'])
+               subset=['日涨跌幅', '月涨跌幅'])
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
-        
-        if topix['current'] is None:
-             st.warning("注意：未能获取 Topix 实时数据，Alpha 暂基于今日开盘或昨日收盘计算。")
             
     else:
-        st.error("获取数据失败或代码格式错误。")
+        st.error("未获取到数据，请检查代码或网络。")
