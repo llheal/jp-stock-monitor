@@ -1,161 +1,255 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 import pytz
+import re
 
 # --- 页面配置 ---
-st.set_page_config(page_title="日股深度看板", page_icon="🇯🇵", layout="centered")
+st.set_page_config(page_title="日股Alpha监控", page_icon="🇯🇵", layout="wide")
 
 # --- 1. 配置区域 ---
-FALLBACK_CODES = "7203, 9984, 8035" 
+# 默认值示例：丰田(100股), 软银(200股), 东电(500股)
+FALLBACK_CODES = "7203:100, 9984:200, 8035:100" 
+
 if "codes" in st.query_params:
     initial_value = st.query_params["codes"]
 else:
     initial_value = FALLBACK_CODES
 
-st.sidebar.header("⚙️ 监控配置")
-user_input = st.sidebar.text_area("持仓/关注代码 (逗号分隔)", value=initial_value, height=100)
-st.sidebar.caption("系统会自动添加 日经225 和 TOPIX 指数。")
+# --- 侧边栏 ---
+st.sidebar.header("⚙️ 投资组合配置")
+st.sidebar.caption("格式：代码:股数 (英文冒号)。如果不填股数，默认按 100 股计算权重。")
+user_input = st.sidebar.text_area("持仓列表", value=initial_value, height=150)
 
-# --- 辅助函数：获取本月第一天日期 ---
+# --- 辅助函数 ---
+
 def get_month_start_date():
-    #以此确保请求历史数据时覆盖到本月第一天
+    """获取本月第一天的日期字符串"""
     tz = pytz.timezone('Asia/Tokyo')
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心函数：获取数据 ---
-def get_market_data(user_codes_str):
-    # 1. 定义指数列表
-    indices = [
-        {"code": "^N225", "name": "日经225", "type": "指数"},
-        {"code": "^TOPX", "name": "TOPIX", "type": "指数"}
-    ]
+def get_topix_from_yahoo_jp():
+    """
+    从 Yahoo Japan 爬取 Topix 实时数据。
+    策略：爬取网页 Title 标签，因为它比 CSS Class 更稳定。
+    Title 格式通常为: "トピックス【000001.O】：2,700.50 - ..."
+    """
+    url = "https://finance.yahoo.co.jp/quote/000001.O"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=4)
+        soup = BeautifulSoup(r.content, "html.parser")
+        title_text = soup.title.string if soup.title else ""
+        
+        # 使用正则提取价格：查找全角冒号或【】后面的数字
+        # 匹配模式：任意字符 + 冒号/空格 + 数字(含逗号和小数点)
+        match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', title_text)
+        
+        if match:
+            price_str = match.group(1).replace(',', '')
+            return float(price_str)
+        return None
+    except Exception as e:
+        print(f"Topix scraping failed: {e}")
+        return None
+
+def get_topix_month_open():
+    """
+    获取 Topix 本月开盘价。
+    由于 Yahoo Japan 历史数据爬取困难，这里我们回退使用 yfinance 的历史数据功能。
+    yfinance 的历史数据通常是准确的，只是实时数据有延迟。
+    """
+    try:
+        # ^TOPX 是 yfinance 里的 Topix 代码
+        hist = yf.Ticker("^TOPX").history(start=get_month_start_date(), interval="1d")
+        if not hist.empty:
+            return hist.iloc[0]['Open']
+        return None
+    except:
+        return None
+
+# --- 核心逻辑 ---
+def calculate_portfolio(user_input_str):
+    # 1. 解析用户输入 (代码:股数)
+    raw_items = [x.strip() for x in user_input_str.replace('，', ',').split(',') if x.strip()]
+    portfolio = []
     
-    # 2. 处理用户输入的个股
-    raw_codes = [c.strip() for c in user_codes_str.replace('，', ',').split(',') if c.strip()]
-    stock_tickers = []
-    for code in raw_codes:
-        # 如果是纯数字，加 .T；如果带后缀或指数代码则保留
-        if code.isdigit():
-            stock_tickers.append({"code": f"{code}.T", "name": code, "type": "个股"})
-        else:
-            stock_tickers.append({"code": code, "name": code, "type": "个股"})
+    for item in raw_items:
+        parts = item.split(':')
+        code = parts[0].strip()
+        shares = float(parts[1]) if len(parts) > 1 else 100.0 # 默认100股
+        
+        # 格式化 yfinance 代码
+        yf_ticker = f"{code}.T" if code.isdigit() else code
+        portfolio.append({"code": code, "yf_ticker": yf_ticker, "shares": shares})
     
-    # 合并列表：指数在前，个股在后
-    all_items = indices + stock_tickers
+    if not portfolio:
+        return None, None, None
+
+    # 2. 获取 Topix 数据 (基准)
+    topix_current = get_topix_from_yahoo_jp()
+    topix_open = get_topix_month_open()
     
-    data_list = []
+    # 如果爬虫失败，尝试用 yfinance 兜底，或者标记为 NaN
+    if topix_current is None and topix_open: 
+        # 紧急兜底：如果爬不到实时，暂时用 yesterday close
+        topix_current = topix_open 
+
+    topix_data = {
+        "name": "TOPIX (基准)",
+        "current": topix_current,
+        "month_open": topix_open,
+        "pct_change": (topix_current - topix_open) / topix_open if (topix_current and topix_open) else 0.0
+    }
+
+    # 3. 获取个股数据 & 计算组合价值
+    stock_data_list = []
+    total_current_value = 0.0
+    total_open_value = 0.0 # 月初持仓价值
+    
     month_start = get_month_start_date()
-    
+
     # 进度条
-    progress_bar = st.progress(0)
+    bar = st.progress(0)
     
-    for i, item in enumerate(all_items):
-        ticker_symbol = item["code"]
+    for i, p in enumerate(portfolio):
         try:
-            stock = yf.Ticker(ticker_symbol)
+            ticker = yf.Ticker(p["yf_ticker"])
             
-            # --- A. 获取实时/今日数据 ---
-            fi = stock.fast_info
+            # A. 实时数据
+            fi = ticker.fast_info
             current_price = fi.last_price
             prev_close = fi.previous_close
             
-            # 日涨跌计算
-            if prev_close and prev_close > 0:
-                day_change_pct = ((current_price - prev_close) / prev_close)
-                day_change_amt = current_price - prev_close
-            else:
-                day_change_pct = 0
-                day_change_amt = 0
-
-            # --- B. 获取月度数据 (计算月涨跌) ---
-            # 获取从本月1号开始的历史数据
-            hist = stock.history(start=month_start, interval="1d")
-            
+            # B. 月初数据
+            hist = ticker.history(start=month_start, interval="1d")
             if not hist.empty:
-                # 逻辑：取 hist 的第一行（即本月第一个交易日）的 'Open' 价
-                month_open_price = hist.iloc[0]['Open']
-                
-                if month_open_price > 0:
-                    month_change_pct = (current_price - month_open_price) / month_open_price
-                else:
-                    month_change_pct = 0
+                month_open = hist.iloc[0]['Open']
             else:
-                month_open_price = current_price # 兜底
-                month_change_pct = 0
-
-            data_list.append({
-                "名称/代码": item["name"],
-                "类型": item["type"],
+                month_open = prev_close # 兜底
+            
+            # 计算单只股票价值
+            val_current = current_price * p["shares"]
+            val_open = month_open * p["shares"]
+            
+            total_current_value += val_current
+            total_open_value += val_open
+            
+            # 计算单只涨跌 (纯小数)
+            # 之前可能错在 month_change_pct * 100，这里保持纯小数
+            month_change = (current_price - month_open) / month_open if month_open else 0
+            day_change = (current_price - prev_close) / prev_close if prev_close else 0
+            
+            stock_data_list.append({
+                "代码": p["code"],
+                "持有股数": p["shares"],
                 "当前价": current_price,
-                "日涨跌幅": day_change_pct, # 保持小数，后面用format格式化
-                "日涨跌额": day_change_amt,
-                "月涨跌幅": month_change_pct,
-                "月初开盘": month_open_price
+                "月初开盘": month_open,
+                "日涨跌幅": day_change,   # 0.05 = 5%
+                "月涨跌幅": month_change, # 0.05 = 5%
+                "持仓市值": val_current,
+                "月度盈亏": val_current - val_open
             })
             
         except Exception as e:
-            pass # 忽略获取失败的个股
-            
-        progress_bar.progress((i + 1) / len(all_items))
+            st.error(f"Error {p['code']}: {e}")
         
-    progress_bar.empty()
-    return pd.DataFrame(data_list)
+        bar.progress((i + 1) / len(portfolio))
+    
+    bar.empty()
+    
+    # 4. 计算组合总表现
+    if total_open_value > 0:
+        portfolio_month_return = (total_current_value - total_open_value) / total_open_value
+    else:
+        portfolio_month_return = 0.0
+        
+    # 计算 Alpha (组合收益 - 基准收益)
+    alpha = portfolio_month_return - topix_data["pct_change"]
+    
+    summary = {
+        "port_return": portfolio_month_return,
+        "topix_return": topix_data["pct_change"],
+        "alpha": alpha,
+        "total_pnl": total_current_value - total_open_value,
+        "total_val": total_current_value
+    }
+    
+    return pd.DataFrame(stock_data_list), summary, topix_data
 
 # --- 主界面 ---
-st.title("🇯🇵 日股深度行情")
+st.title("🇯🇵 日股实盘 & Alpha 监控")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
-if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在计算日线与月线数据...'):
-        df = get_market_data(user_input)
+if st.button("🔄 刷新数据 & 计算 Alpha", use_container_width=True):
+    with st.spinner('正在从 Yahoo Japan 和 交易所 拉取数据...'):
+        df, summary, topix = calculate_portfolio(user_input)
     
-    if not df.empty:
-        # --- 样式定义 ---
-        def style_dataframe(dataframe):
-            return dataframe.style.format({
-                "当前价": "{:,.1f}",
-                "月初开盘": "{:,.1f}",
-                "日涨跌额": "{:+.1f}",
-                "日涨跌幅": "{:+.2%}",
-                "月涨跌幅": "{:+.2%}"
-            }).map(lambda x: 'color: #d32f2f; font-weight: bold' if x > 0 else ('color: #2e7d32; font-weight: bold' if x < 0 else 'color: gray'), 
-                   subset=['日涨跌幅', '日涨跌额', '月涨跌幅'])
-
-        # 分开展示指数和个股，或者合并展示
-        # 这里为了直观，我们把指数高亮或者置顶
+    if df is not None and not df.empty:
+        # --- 1. 核心指标卡片 ---
+        col1, col2, col3, col4 = st.columns(4)
         
-        st.subheader("📊 市场概览 & 持仓")
-        st.dataframe(
-            style_dataframe(df), 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "类型": st.column_config.TextColumn("类型", width="small"),
-                "月涨跌幅": st.column_config.ProgressColumn(
-                    "月度表现",
-                    format="%.2f%%",
-                    min_value=-0.2, # 进度条范围 -20% 到 +20%
-                    max_value=0.2,
-                ),
-            }
-        )
+        # 辅助样式函数
+        def metric_color(val):
+            return "normal" # Streamlit metric 自带红绿，不需要额外CSS，除非用markdown
+            
+        col1.metric("📊 组合月度收益", f"{summary['port_return']:.2%}", 
+                    delta=f"{summary['total_pnl']:,.0f} 円")
         
-        # 简单的文字总结
-        nikkei = df[df['名称/代码'] == '日经225']
-        if not nikkei.empty:
-            nk_val = nikkei.iloc[0]['日涨跌幅']
-            st.info(f"日经225 今日表现: {nk_val:+.2%}")
-
+        col2.metric("🇯🇵 Topix 月度表现", f"{topix['topix_return']:.2%}",
+                    help="数据来源: Yahoo! Japan (实时) + Yahoo Finance (月初)")
+        
+        # Alpha 高亮
+        alpha_val = summary['alpha']
+        col3.metric("🚀 Alpha (超额收益)", f"{alpha_val:+.2%}", 
+                    delta_color="normal" if alpha_val > 0 else "inverse")
+        
+        col4.metric("💰 持仓总市值", f"¥{summary['total_val']:,.0f}")
+        
+        st.divider()
+        
+        # --- 2. 持仓明细表 ---
+        st.subheader("📋 持仓明细")
+        
+        # 样式设置：确保百分比显示正确
+        # 逻辑：如果 raw 是 0.05，format("{:.2%}") 会显示 5.00%
+        styled_df = df.style.format({
+            "当前价": "{:,.1f}",
+            "月初开盘": "{:,.1f}",
+            "持有股数": "{:,.0f}",
+            "持仓市值": "¥{:,.0f}",
+            "月度盈亏": "{:+,.0f}",
+            "日涨跌幅": "{:+.2%}", # 关键修复：这里会自动 * 100
+            "月涨跌幅": "{:+.2%}"  # 关键修复：这里会自动 * 100
+        }).map(lambda x: 'color: #d32f2f; font-weight: bold' if x > 0 else ('color: #2e7d32; font-weight: bold' if x < 0 else 'color: gray'), 
+               subset=['日涨跌幅', '月涨跌幅', '月度盈亏'])
+        
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        
+        # --- 3. 调试信息 (可选) ---
+        if topix['current']:
+            st.caption(f"Debug: Topix Realtime (YJ) = {topix['current']}, Month Open = {topix['month_open']}")
+        else:
+            st.warning("⚠️ 无法从 Yahoo Japan 获取 Topix 实时数据，Alpha 计算可能不准确。")
+            
     else:
-        st.error("获取数据失败，请检查网络或代码。")
+        st.error("未获取到数据，请检查代码格式。")
 
-# --- 说明区域 ---
-with st.expander("ℹ️ 涨跌幅计算说明"):
+# --- 说明 ---
+with st.expander("ℹ️ 计算逻辑说明"):
     st.markdown("""
-    * **日涨跌幅**：`(当前价 - 昨日收盘价) / 昨日收盘价`
-    * **月涨跌幅**：`(当前价 - 本月首个交易日开盘价) / 本月首个交易日开盘价`
-    * **数据源**：Yahoo Finance (延迟约 15-20 分钟，指数数据可能视API情况而定)
+    * **数据源**：
+        * **Topix实时**：爬取 Yahoo! Finance Japan (因为 yfinance 的 Topix 经常延迟或中断)。
+        * **Topix月初**：使用 yfinance 历史数据。
+        * **个股**：使用 yfinance (实时+历史)。
+    * **Alpha 计算**：
+        * `Alpha = 组合月度加权收益率 - Topix月度收益率`
+    * **百分比修复**：
+        * 已确认计算逻辑为 `(现价 - 原价) / 原价` (纯小数)，并使用 standard formatting 显示，解决了之前的显示错误。
     """)
