@@ -92,7 +92,7 @@ def calculate_data(user_input_str, leverage_ratio):
     # A. 获取点数 (面子)
     tp_val = get_topix_value_minkabu()
     if tp_val is None:
-        tp_val = 0.0 # 如果爬虫失败，显示0或保留上次数据
+        tp_val = 0.0
     
     # B. 获取涨跌幅 (里子 - 使用 1306.T)
     tp_month_pct = 0.0
@@ -101,23 +101,19 @@ def calculate_data(user_input_str, leverage_ratio):
     try:
         etf = yf.Ticker("1306.T")
         fi = etf.fast_info
-        
-        # ETF 价格数据
         etf_curr = fi.last_price
         etf_prev = fi.previous_close
         
-        # 计算日涨跌 (基于 ETF)
         if etf_curr and etf_prev:
             tp_day_pct = (etf_curr - etf_prev) / etf_prev
             
-        # 计算月涨跌 (基于 ETF)
         hist = etf.history(start=month_start, interval="1d")
         if not hist.empty:
             etf_month_open = hist.iloc[0]['Open']
             if etf_curr:
                 tp_month_pct = (etf_curr - etf_month_open) / etf_month_open
     except:
-        pass # 如果 ETF 也挂了，保持 0.0
+        pass
 
     # ==========================================
     # 2. 日经225 数据 (正常 yfinance)
@@ -200,7 +196,7 @@ def calculate_data(user_input_str, leverage_ratio):
         "port_ret": leveraged_port_return,
         "alpha": alpha,
         "nk": {"pct": nk_month_pct, "val": nk_curr, "day": nk_day_pct},
-        "tp": {"pct": tp_month_pct, "val": tp_val, "day": tp_day_pct} # val来自爬虫，pct来自ETF
+        "tp": {"pct": tp_month_pct, "val": tp_val, "day": tp_day_pct}
     }
 
 # --- 主界面 ---
@@ -242,9 +238,8 @@ if st.button("🔄 刷新数据", use_container_width=True):
                 value_for_color=data['nk']['pct']
             )
             
-        # 4. Topix (混合数据展示)
+        # 4. Topix
         with c4:
-            # 这里显示 Minkabu 的点数，但显示 ETF 的涨跌幅
             tp_val_str = f"{data['tp']['val']:,.2f}" if data['tp']['val'] > 0 else "N/A"
             tp_sub = f"当前: {tp_val_str} | 日(ETF): {data['tp']['day']:+.2%}"
             
@@ -270,7 +265,16 @@ if st.button("🔄 刷新数据", use_container_width=True):
             "月涨跌幅": "{:+.2%}"
         }).map(color_arrow, subset=['日涨跌幅', '月涨跌幅'])
         
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        # --- 关键修改：动态计算高度 ---
+        # 35px 是单行大约高度，38px 是表头高度，3 是缓冲
+        calc_height = (len(data["df"]) + 1) * 35 + 3
+        
+        st.dataframe(
+            styled_df, 
+            use_container_width=True, 
+            hide_index=True,
+            height=calc_height # 这里强制设置高度，消除滚动条
+        )
         
     else:
         st.error("无法获取数据。")
