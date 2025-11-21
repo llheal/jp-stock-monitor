@@ -82,12 +82,13 @@ def calculate_data(user_input_str):
             if topix_current is None:
                 topix_current = tp_hist.iloc[-1]['Close']
             
-            topix_pct = (topix_current - topix_open) / topix_open
+            # 只有当 topix_current 有值时才计算
+            if topix_current:
+                topix_pct = (topix_current - topix_open) / topix_open
     except:
         pass
 
     # 2. 计算个股数据
-    # 兼容 "7203:100" 或 "7203" 格式，但计算时忽略股数
     raw_items = [x.strip() for x in user_input_str.replace('，', ',').split(',') if x.strip()]
     
     individual_returns = [] # 存储每只股票的月收益率
@@ -97,7 +98,6 @@ def calculate_data(user_input_str):
     
     for i, item in enumerate(raw_items):
         try:
-            # 解析代码（忽略冒号后面的股数）
             parts = item.split(':')
             code = parts[0].strip()
             
@@ -110,17 +110,17 @@ def calculate_data(user_input_str):
             prev_close = fi.previous_close
             
             hist = stock.history(start=month_start, interval="1d")
-            # 只要有数据就计算，否则设为0
+            
             if not hist.empty and current_price:
                 month_open = hist.iloc[0]['Open']
-                day_change = (current_price - prev_close) / prev_close
-                month_change = (current_price - month_open) / month_open
+                # 安全除法
+                day_change = (current_price - prev_close) / prev_close if prev_close else 0
+                month_change = (current_price - month_open) / month_open if month_open else 0
             else:
                 month_open = prev_close
                 day_change = 0.0
                 month_change = 0.0
             
-            # 收集数据
             individual_returns.append(month_change)
             
             table_rows.append({
@@ -131,7 +131,7 @@ def calculate_data(user_input_str):
             })
             
         except:
-            pass # 忽略错误
+            pass 
         bar.progress((i + 1) / len(raw_items))
         
     bar.empty()
@@ -162,7 +162,15 @@ if st.button("🔄 刷新数据", use_container_width=True):
         col1.metric("📊 组合平均收益", f"{port_ret:+.2%}", help="计算方式：所有持仓股票月涨跌幅的平均值")
         col2.metric("🚀 Alpha (vs Topix)", f"{alpha:+.2%}", delta_color="normal" if alpha > 0 else "inverse")
         col3.metric("🇯🇵 日经225 (月)", f"{nk_pct:+.2%}")
-        col4.metric("🇯🇵 Topix (月)", f"{tp_pct:+.2%}", help=f"当前点数: {tp_val:,.2f} (来源: Yahoo! JP)")
+        
+        # --- 关键修复点 ---
+        # 判断 tp_val 是否为 None，防止格式化报错
+        if tp_val is not None:
+            topix_help = f"当前点数: {tp_val:,.2f} (来源: Yahoo! JP)"
+        else:
+            topix_help = "当前点数: N/A (获取失败)"
+            
+        col4.metric("🇯🇵 Topix (月)", f"{tp_pct:+.2%}", help=topix_help)
         
         st.divider()
         
