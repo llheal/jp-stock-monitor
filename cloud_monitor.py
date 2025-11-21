@@ -191,8 +191,14 @@ def calculate_data(user_input_str, leverage_ratio):
         
     alpha = leveraged_port_return - tp_month_pct
     
+    # 创建并排序 DataFrame
+    df = pd.DataFrame(table_rows)
+    if not df.empty:
+        # --- 关键修改：按月涨跌幅降序排序 ---
+        df = df.sort_values(by='月涨跌幅', ascending=False)
+
     return {
-        "df": pd.DataFrame(table_rows),
+        "df": df,
         "port_ret": leveraged_port_return,
         "alpha": alpha,
         "nk": {"pct": nk_month_pct, "val": nk_curr, "day": nk_day_pct},
@@ -200,7 +206,7 @@ def calculate_data(user_input_str, leverage_ratio):
     }
 
 # --- 主界面 ---
-st.title("🇯🇵 收益率")
+st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
@@ -253,7 +259,7 @@ if st.button("🔄 刷新数据", use_container_width=True):
         st.divider()
         
         # 表格
-        st.caption("📋 个股表现 (原始涨跌幅)")
+        st.caption("📋 个股表现 (月涨幅排序)")
         def color_arrow(val):
             if val > 0: return 'color: #d32f2f; font-weight: bold'
             elif val < 0: return 'color: #2e7d32; font-weight: bold'
@@ -265,17 +271,15 @@ if st.button("🔄 刷新数据", use_container_width=True):
             "月涨跌幅": "{:+.2%}"
         }).map(color_arrow, subset=['日涨跌幅', '月涨跌幅'])
         
-        # --- 关键修改：动态计算高度 ---
-        # 35px 是单行大约高度，38px 是表头高度，3 是缓冲
+        # 动态高度
         calc_height = (len(data["df"]) + 1) * 35 + 3
         
         st.dataframe(
             styled_df, 
             use_container_width=True, 
             hide_index=True,
-            height=calc_height # 这里强制设置高度，消除滚动条
+            height=calc_height 
         )
         
     else:
         st.error("无法获取数据。")
-
