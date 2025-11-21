@@ -200,7 +200,7 @@ def calculate_data(user_input_str, leverage_ratio):
     }
 
 # --- 主界面 ---
-st.title("🇯🇵 日股收益率看板")
+st.title("🇯🇵 收益率")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
@@ -278,3 +278,4 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
     else:
         st.error("无法获取数据。")
+
