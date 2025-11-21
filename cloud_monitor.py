@@ -32,64 +32,67 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心爬虫：Yahoo JP (精准定位版) ---
-def get_topix_yahoo_jp_span():
+# --- 核心爬虫：Yahoo JP (基于提供的 HTML 修正) ---
+def get_topix_yahoo_jp_v2():
     """
-    根据用户提供的 HTML 结构抓取 Topix
-    Target: <span class="StyledNumber__value__3rXW">3,289.64</span>
-    URL: https://finance.yahoo.co.jp/quote/998405.T
+    Target Logic:
+    1. Find parent span: class includes "PriceBoard__price__1V0k"
+    2. Find child span: class includes "StyledNumber__value__3rXW"
     """
     url = "https://finance.yahoo.co.jp/quote/998405.T"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "max-age=0",
-        "Referer": "https://finance.yahoo.co.jp/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://finance.yahoo.co.jp/",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
     }
     
-    price = None
     try:
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200:
             soup = BeautifulSoup(r.content, "html.parser")
             
-            # --- 关键修改：使用你提供的 class 名 ---
-            # class="StyledNumber__value__3rXW"
-            target_span = soup.find("span", class_="StyledNumber__value__3rXW")
+            # --- 精准定位策略 ---
+            # 1. 找到包含 "PriceBoard__price__1V0k" 的父级 span
+            #    BeautifulSoup 的 class_ 查找是部分匹配的，只要列表中包含即可
+            parent_span = soup.find("span", class_="PriceBoard__price__1V0k")
             
-            if target_span:
-                price_str = target_span.text.strip().replace(",", "")
-                price = float(price_str)
-            else:
-                # 备用：万一 class 变了，尝试找 Title (旧方法)
-                if soup.title:
-                    match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', soup.title.string)
-                    if match:
-                        price = float(match.group(1).replace(',', ''))
-                        
+            if parent_span:
+                # 2. 在父级中找数值 span
+                value_span = parent_span.find("span", class_="StyledNumber__value__3rXW")
+                if value_span:
+                    price_str = value_span.text.strip().replace(",", "")
+                    return float(price_str)
+                    
     except Exception as e:
-        print(f"Yahoo JP Scraping Error: {e}")
+        print(f"Yahoo Parse Error: {e}")
         return None
-        
-    return price
+    return None
 
-# --- 综合获取 Topix 数据 ---
+# --- 综合数据获取 ---
 def get_topix_data_combined(month_start):
     # 1. 尝试爬取 Yahoo JP
-    current_price = get_topix_yahoo_jp_span()
+    current_price = get_topix_yahoo_jp_v2()
     source = "Yahoo! JP (Live)"
     
-    # 2. 如果爬虫失败，使用 yfinance (备选)
+    # 2. 失败则回退到 yfinance
     if current_price is None:
         try:
             t = yf.Ticker("^TOPX")
-            current_price = t.fast_info.last_price
-            source = "Yahoo Finance (Backup)"
+            fi = t.fast_info
+            if fi.last_price:
+                current_price = fi.last_price
+                source = "Yahoo Finance (Backup)"
+            else:
+                # 如果 fast_info 拿不到，拿历史数据最后一行
+                hist = t.history(period="1d")
+                if not hist.empty:
+                    current_price = hist.iloc[-1]['Close']
+                    source = "Historical Close (Delayed)"
         except:
             pass
 
-    # 3. 获取月初开盘价 (始终用 yfinance 历史数据)
+    # 3. 获取月初开盘 (yfinance)
     month_open = None
     try:
         hist = yf.Ticker("^TOPX").history(start=month_start, interval="1d")
@@ -98,7 +101,6 @@ def get_topix_data_combined(month_start):
             # 终极兜底
             if current_price is None:
                 current_price = hist.iloc[-1]['Close']
-                source = "Historical Close"
     except:
         pass
         
@@ -108,7 +110,7 @@ def get_topix_data_combined(month_start):
 def calculate_data(user_input_str, leverage_ratio):
     month_start = get_month_start_date()
     
-    # 1. Topix 处理
+    # 1. Topix
     tp_curr, tp_open, tp_src = get_topix_data_combined(month_start)
     
     if tp_curr and tp_open:
@@ -117,7 +119,7 @@ def calculate_data(user_input_str, leverage_ratio):
         topix_pct = 0.0
         tp_curr = 0.0
 
-    # 2. 日经225 处理
+    # 2. 日经225
     nikkei_pct = 0.0
     try:
         nk = yf.Ticker("^N225")
@@ -129,7 +131,7 @@ def calculate_data(user_input_str, leverage_ratio):
     except:
         pass
 
-    # 3. 个股处理
+    # 3. 个股
     raw_items = [x.strip() for x in re.split(r'[,\n]', user_input_str) if x.strip()]
     individual_returns = [] 
     table_rows = []
@@ -187,13 +189,13 @@ st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在连接 Yahoo Japan 获取实时 Topix...'):
+    with st.spinner('正在解析数据...'):
         df, port_ret, alpha, nk_pct, tp_pct, tp_val, tp_src = calculate_data(user_input, leverage)
     
     if not df.empty:
         col1, col2, col3, col4 = st.columns(4)
         
-        # --- 颜色逻辑: Inverse (红涨绿跌) ---
+        # 颜色逻辑: inverse (红涨绿跌)
         col1.metric(f"📊 组合收益 ({leverage}x)", f"{port_ret:+.2%}", 
                     delta=f"{port_ret:+.2%}", delta_color="inverse")
         
@@ -210,8 +212,8 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
         st.divider()
         
-        # --- 表格 ---
-        st.caption("📋 个股表现 (显示原始涨跌幅)")
+        # 表格
+        st.caption("📋 个股表现 (原始涨跌幅)")
         
         def color_arrow(val):
             if val > 0:
@@ -228,5 +230,9 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
+        # 调试提示
+        if "Yahoo! JP" not in tp_src:
+            st.warning(f"⚠️ Topix 数据源已降级为: {tp_src}。说明 Streamlit 服务器 IP 被 Yahoo Japan 暂时拦截。")
+        
     else:
-        st.error("无法获取数据，请检查网络连接。")
+        st.error("无法获取数据。")
