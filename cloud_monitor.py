@@ -32,50 +32,55 @@ def get_month_start_date():
     now = datetime.now(tz)
     return now.replace(day=1).strftime('%Y-%m-%d')
 
-# --- 核心爬虫：Google Finance (针对 Topix) ---
-def get_topix_google():
+# --- 核心爬虫：Yahoo JP (精准定位版) ---
+def get_topix_yahoo_jp_span():
     """
-    从 Google Finance 爬取 Topix 实时数据
-    URL: https://www.google.com/finance/quote/TOPIX:INDEXTOKYO
+    根据用户提供的 HTML 结构抓取 Topix
+    Target: <span class="StyledNumber__value__3rXW">3,289.64</span>
+    URL: https://finance.yahoo.co.jp/quote/998405.T
     """
-    url = "https://www.google.com/finance/quote/TOPIX:INDEXTOKYO"
+    url = "https://finance.yahoo.co.jp/quote/998405.T"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "max-age=0",
+        "Referer": "https://finance.yahoo.co.jp/"
     }
     
     price = None
     try:
-        r = requests.get(url, headers=headers, timeout=4)
+        r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200:
             soup = BeautifulSoup(r.content, "html.parser")
-            # Google Finance 当前价格的 class 通常是 "YMlKec fxKbKc"
-            # 我们尝试用 class 查找，如果变了再尝试更宽泛的查找
-            price_div = soup.select_one(".YMlKec.fxKbKc")
             
-            if price_div:
-                price_str = price_div.text.replace(",", "")
+            # --- 关键修改：使用你提供的 class 名 ---
+            # class="StyledNumber__value__3rXW"
+            target_span = soup.find("span", class_="StyledNumber__value__3rXW")
+            
+            if target_span:
+                price_str = target_span.text.strip().replace(",", "")
                 price = float(price_str)
             else:
-                # 备用方案：查找页面中所有 class="YMlKec" 的元素（通常是大字号价格）
-                # 取第一个一般就是主价格
-                fallback_div = soup.select_one(".YMlKec")
-                if fallback_div:
-                    price_str = fallback_div.text.replace(",", "")
-                    price = float(price_str)
-                    
+                # 备用：万一 class 变了，尝试找 Title (旧方法)
+                if soup.title:
+                    match = re.search(r'[：:]\s*([0-9,]+\.[0-9]+)', soup.title.string)
+                    if match:
+                        price = float(match.group(1).replace(',', ''))
+                        
     except Exception as e:
-        print(f"Google Scraping Error: {e}")
+        print(f"Yahoo JP Scraping Error: {e}")
         return None
         
     return price
 
 # --- 综合获取 Topix 数据 ---
 def get_topix_data_combined(month_start):
-    # 1. 获取实时价格 (优先 Google)
-    current_price = get_topix_google()
-    source = "Google Finance"
+    # 1. 尝试爬取 Yahoo JP
+    current_price = get_topix_yahoo_jp_span()
+    source = "Yahoo! JP (Live)"
     
-    # 如果 Google 失败，尝试 yfinance (备选)
+    # 2. 如果爬虫失败，使用 yfinance (备选)
     if current_price is None:
         try:
             t = yf.Ticker("^TOPX")
@@ -84,17 +89,16 @@ def get_topix_data_combined(month_start):
         except:
             pass
 
-    # 2. 获取月初开盘价 (使用 yfinance 历史数据，这个通常很稳)
+    # 3. 获取月初开盘价 (始终用 yfinance 历史数据)
     month_open = None
     try:
-        # 就算实时获取不到，历史数据一般能拿到
         hist = yf.Ticker("^TOPX").history(start=month_start, interval="1d")
         if not hist.empty:
             month_open = hist.iloc[0]['Open']
-            # 终极兜底：如果还没拿到实时价，就用历史收盘价
+            # 终极兜底
             if current_price is None:
                 current_price = hist.iloc[-1]['Close']
-                source = "Historical Close (Delayed)"
+                source = "Historical Close"
     except:
         pass
         
@@ -183,13 +187,13 @@ st.title("🇯🇵 日股收益率看板")
 st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%H:%M:%S')}")
 
 if st.button("🔄 刷新数据", use_container_width=True):
-    with st.spinner('正在从 Google Finance 和 交易所获取数据...'):
+    with st.spinner('正在连接 Yahoo Japan 获取实时 Topix...'):
         df, port_ret, alpha, nk_pct, tp_pct, tp_val, tp_src = calculate_data(user_input, leverage)
     
     if not df.empty:
         col1, col2, col3, col4 = st.columns(4)
         
-        # 颜色逻辑：inverse (红涨绿跌)
+        # --- 颜色逻辑: Inverse (红涨绿跌) ---
         col1.metric(f"📊 组合收益 ({leverage}x)", f"{port_ret:+.2%}", 
                     delta=f"{port_ret:+.2%}", delta_color="inverse")
         
@@ -206,14 +210,14 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
         st.divider()
         
-        # 表格样式：红涨绿跌
-        st.caption("📋 个股表现 (原始涨跌幅)")
+        # --- 表格 ---
+        st.caption("📋 个股表现 (显示原始涨跌幅)")
         
         def color_arrow(val):
             if val > 0:
-                return 'color: #d32f2f; font-weight: bold' # 红
+                return 'color: #d32f2f; font-weight: bold' # Red
             elif val < 0:
-                return 'color: #2e7d32; font-weight: bold' # 绿
+                return 'color: #2e7d32; font-weight: bold' # Green
             return 'color: gray'
 
         styled_df = df.style.format({
@@ -225,4 +229,4 @@ if st.button("🔄 刷新数据", use_container_width=True):
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
     else:
-        st.error("未获取到数据。")
+        st.error("无法获取数据，请检查网络连接。")
