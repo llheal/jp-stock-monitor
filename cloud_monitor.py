@@ -149,8 +149,8 @@ def calculate_data(user_input_str, leverage_ratio):
     # ==========================================
     # 3. 个股 & 组合计算
     # ==========================================
-    raw_items = [x.strip() for x in re.split(r'[,\n]', user_input_str) if x.strip()]
-    individual_returns = [] 
+    cleaned_input = user_input_str.replace('[', '').replace(']', '').replace("'", "").replace('"', "")
+    raw_items = [x.strip() for x in re.split(r'[,\n]', cleaned_input) if x.strip()]
     table_rows = []
     
     bar = st.progress(0)
@@ -316,3 +316,4 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
     else:
         st.error("无法获取数据。")
+
