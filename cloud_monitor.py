@@ -25,6 +25,7 @@ st.sidebar.header("⚙️ 投资组合配置")
 leverage = st.sidebar.number_input("杠杆倍数 (x)", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
 st.sidebar.caption("输入方式：每行一个代码")
 user_input = st.sidebar.text_area("持仓代码列表", value=initial_value, height=300)
+st.query_params["codes"] = user_input
 
 # --- 辅助函数 ---
 def get_month_start_date():
@@ -318,5 +319,6 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
     else:
         st.error("无法获取数据。")
+
 
 
