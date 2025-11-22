@@ -151,6 +151,8 @@ def calculate_data(user_input_str, leverage_ratio):
     # ==========================================
     cleaned_input = user_input_str.replace('[', '').replace(']', '').replace("'", "").replace('"', "")
     raw_items = [x.strip() for x in re.split(r'[,\n]', cleaned_input) if x.strip()]
+
+    individual_returns = []
     table_rows = []
     
     bar = st.progress(0)
@@ -316,4 +318,5 @@ if st.button("🔄 刷新数据", use_container_width=True):
         
     else:
         st.error("无法获取数据。")
+
 
