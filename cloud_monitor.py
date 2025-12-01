@@ -23,6 +23,7 @@ else:
 # --- 侧边栏 ---
 st.sidebar.header("⚙️ 投资组合配置")
 leverage = st.sidebar.number_input("杠杆倍数 (x)", min_value=0.1, max_value=10.0, value=1.5, step=0.1)
+slippage = st.sidebar.number_input("滑点手续费 (%)", min_value=0.0, max_value=5.0, value=0.1, step=0.05) # 新增配置项
 st.sidebar.caption("输入方式：每行一个代码")
 user_input = st.sidebar.text_area("持仓代码列表", value=initial_value, height=300)
 st.query_params["codes"] = user_input
@@ -35,13 +36,12 @@ def get_month_start_date():
 
 # --- 自定义 HTML 卡片渲染 ---
 def display_card(title, main_value_str, sub_info, value_for_color):
-    # 颜色逻辑: 红涨绿跌
     if value_for_color > 0:
-        color = "#d32f2f" # Red
+        color = "#d32f2f" 
     elif value_for_color < 0:
-        color = "#2e7d32" # Green
+        color = "#2e7d32" 
     else:
-        color = "#333333" # Gray/Black
+        color = "#333333" 
 
     html_code = f"""
     <div style="
@@ -62,10 +62,10 @@ def display_card(title, main_value_str, sub_info, value_for_color):
     """
     st.markdown(html_code, unsafe_allow_html=True)
 
-# --- 爬虫逻辑 (Minkabu - 仅获取当前点数) ---
+# --- 爬虫逻辑 (Minkabu) ---
 def get_topix_value_minkabu():
     url = "https://minkabu.jp/stock/KSISU1000"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200:
@@ -80,10 +80,9 @@ def get_topix_value_minkabu():
     return None
 
 # --- 核心数据获取 ---
-def calculate_data(user_input_str, leverage_ratio):
+def calculate_data(user_input_str, leverage_ratio, slippage_pct):
     month_start_str = get_month_start_date() 
     
-    # ... (Topix 和 日经225 获取逻辑保持不变) ...
     # 1. Topix
     tp_val = get_topix_value_minkabu()
     if tp_val is None: tp_val = 0.0
@@ -130,6 +129,9 @@ def calculate_data(user_input_str, leverage_ratio):
     
     bar = st.progress(0)
     
+    # 计算滑点系数 (例如 0.1% -> 1.001)
+    slippage_multiplier = 1 + (slippage_pct / 100.0)
+
     for i, item in enumerate(raw_items):
         try:
             code = item.split(':')[0].strip()
@@ -144,20 +146,27 @@ def calculate_data(user_input_str, leverage_ratio):
             
             day_change = 0.0
             month_change = 0.0
-            month_open = 0.0 # 初始化
+            raw_month_open = 0.0
+            month_open_adjusted = 0.0
             avg_turnover_30d = 0.0
             
             if not hist.empty and current_price:
-                # --- 计算月涨跌幅 ---
+                # --- 获取月初开盘价 ---
                 curr_month_hist = hist[hist.index.strftime('%Y-%m-%d') >= month_start_str]
                 
                 if not curr_month_hist.empty:
-                    month_open = curr_month_hist.iloc[0]['Open']
+                    raw_month_open = curr_month_hist.iloc[0]['Open']
                 else:
-                    month_open = hist.iloc[0]['Open']
+                    raw_month_open = hist.iloc[0]['Open']
                 
+                # --- [关键修改] 应用滑点 ---
+                # 成本 = 原始开盘价 * (1 + 0.1%)
+                month_open_adjusted = raw_month_open * slippage_multiplier
+                
+                # --- [关键修改] 计算涨跌幅 ---
+                # 收益 = (当前价 - 成本) / 成本
                 day_change = (current_price - prev_close) / prev_close if prev_close else 0
-                month_change = (current_price - month_open) / month_open if month_open else 0
+                month_change = (current_price - month_open_adjusted) / month_open_adjusted if month_open_adjusted else 0
                 
                 # --- 计算30日均额 ---
                 hist['Turnover'] = hist['Close'] * hist['Volume']
@@ -172,7 +181,7 @@ def calculate_data(user_input_str, leverage_ratio):
             
             table_rows.append({
                 "代码": code,
-                "月初开盘": month_open, # <--- 新增列
+                "月初成本(含费)": month_open_adjusted, # 列名稍微改得更清晰一点
                 "当前价": current_price,
                 "日涨跌幅": day_change,
                 "月涨跌幅": month_change,
@@ -195,8 +204,7 @@ def calculate_data(user_input_str, leverage_ratio):
     
     df = pd.DataFrame(table_rows)
     if not df.empty:
-        # 调整列顺序，把月初开盘放在当前价前面
-        cols = ["代码", "月初开盘", "当前价", "日涨跌幅", "月涨跌幅", "30日均额(亿)"]
+        cols = ["代码", "月初成本(含费)", "当前价", "日涨跌幅", "月涨跌幅", "30日均额(亿)"]
         df = df[cols].sort_values(by='月涨跌幅', ascending=False)
 
     return {
@@ -213,27 +221,27 @@ st.caption(f"刷新时间 (JST): {datetime.now(pytz.timezone('Asia/Tokyo')).strf
 
 if st.button("🔄 刷新数据", use_container_width=True):
     with st.spinner('正在计算...'):
-        data = calculate_data(user_input, leverage)
+        # 传入 slippage 参数
+        data = calculate_data(user_input, leverage, slippage)
     
     if not data["df"].empty:
         c1, c2, c3, c4 = st.columns(4)
         
-        with c1: display_card(f"📊 组合月收益 ({leverage}x)", f"{data['port_ret']:+.2%}", "基于持仓平均涨幅", data['port_ret'])
+        with c1: display_card(f"📊 组合月收益 ({leverage}x)", f"{data['port_ret']:+.2%}", "基于持仓平均涨幅(含费)", data['port_ret'])
         with c2: display_card("🚀 Alpha (vs Topix)", f"{data['alpha']:+.2%}", "超额收益 (月度)", data['alpha'])
         with c3: display_card("🇯🇵 日经225 (月)", f"{data['nk']['pct']:+.2%}", f"当前: {data['nk']['val']:,.0f} | 日: {data['nk']['day']:+.2%}", data['nk']['pct'])
         with c4: display_card("🇯🇵 Topix (月)", f"{data['tp']['pct']:+.2%}", f"当前: {data['tp']['val']:,.2f} | 日: {data['tp']['day']:+.2%}", data['tp']['pct'])
         
         st.divider()
-        st.caption("📋 个股表现 (月涨幅排序)")
+        st.caption(f"📋 个股表现 (月涨幅排序) - 已计入 {slippage}% 滑点成本")
         
         def color_arrow(val):
             if val > 0: return 'color: #d32f2f; font-weight: bold'
             elif val < 0: return 'color: #2e7d32; font-weight: bold'
             return 'color: gray'
 
-        # 样式格式化：增加了月初开盘
         styled_df = data["df"].style.format({
-            "月初开盘": "{:,.1f}",   # <--- 新增格式
+            "月初成本(含费)": "{:,.1f}",
             "当前价": "{:,.1f}",
             "日涨跌幅": "{:+.2%}",
             "月涨跌幅": "{:+.2%}",
